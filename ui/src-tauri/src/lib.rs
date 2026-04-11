@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+use tauri_nspanel::{cocoa::appkit::NSWindowCollectionBehavior, panel_delegate, WebviewWindowExt};
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub role: String,
@@ -83,9 +87,61 @@ async fn send_message(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![open_chat_window, send_message])
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            init_overlay_panel(app.handle());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Convert the overlay window to a floating NSPanel — copied from Pluely's lib.rs init()
+#[cfg(target_os = "macos")]
+#[allow(deprecated, unexpected_cfgs)]
+fn init_overlay_panel(app_handle: &tauri::AppHandle) {
+    let window = app_handle.get_webview_window("overlay").unwrap();
+    let panel = window.to_panel().unwrap();
+
+    let delegate = panel_delegate!(HeyTAPanelDelegate {
+        window_did_become_key,
+        window_did_resign_key
+    });
+
+    delegate.set_listener(Box::new(move |delegate_name: String| {
+        match delegate_name.as_str() {
+            "window_did_become_key" => {}
+            "window_did_resign_key" => {}
+            _ => {}
+        }
+    }));
+
+    // Float above all other windows (NSFloatWindowLevel = 4)
+    #[allow(non_upper_case_globals)]
+    const NSFloatWindowLevel: i32 = 4;
+    panel.set_level(NSFloatWindowLevel);
+
+    // Don't steal focus from other apps when clicked
+    #[allow(non_upper_case_globals)]
+    const NSWindowStyleMaskNonActivatingPanel: i32 = 1 << 7;
+    panel.set_style_mask(NSWindowStyleMaskNonActivatingPanel);
+
+    // Show on all Spaces, including fullscreen apps
+    #[allow(deprecated)]
+    panel.set_collection_behaviour(
+        NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces,
+    );
+
+    panel.set_delegate(delegate);
 }
