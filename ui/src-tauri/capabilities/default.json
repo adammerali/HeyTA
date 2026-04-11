@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for all Hey TA windows",
+  "windows": ["overlay", "chat"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "core:window:allow-start-dragging"
+  ]
+}
