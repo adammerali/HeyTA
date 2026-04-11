@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+:root {
+  --background: 0 0% 3.9%;
+  --foreground: 0 0% 98%;
+  --card: 0 0% 6%;
+  --card-foreground: 0 0% 98%;
+  --popover: 0 0% 6%;
+  --popover-foreground: 0 0% 98%;
+  --primary: 160 84% 39%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 0 0% 14.9%;
+  --secondary-foreground: 0 0% 98%;
+  --muted: 0 0% 14.9%;
+  --muted-foreground: 0 0% 63.9%;
+  --accent: 0 0% 14.9%;
+  --accent-foreground: 0 0% 98%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 14.9%;
+  --input: 0 0% 14.9%;
+  --ring: 160 84% 39%;
+  --radius: 0.5rem;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Oxygen,
+    Ubuntu,
+    sans-serif;
+  background: transparent;
+  color: hsl(var(--foreground));
+}
+
+/* Make overlay bar background translucent */
+.dark {
+  color-scheme: dark;
+}
+
+/* Prose styles for markdown rendering */
+.prose {
+  --tw-prose-body: hsl(0 0% 85%);
+  --tw-prose-headings: hsl(0 0% 95%);
+  --tw-prose-lead: hsl(0 0% 75%);
+  --tw-prose-links: hsl(160 84% 50%);
+  --tw-prose-bold: hsl(0 0% 95%);
+  --tw-prose-counters: hsl(0 0% 60%);
+  --tw-prose-bullets: hsl(0 0% 40%);
+  --tw-prose-hr: hsl(0 0% 20%);
+  --tw-prose-quotes: hsl(0 0% 80%);
+  --tw-prose-quote-borders: hsl(0 0% 25%);
+  --tw-prose-captions: hsl(0 0% 55%);
+  --tw-prose-code: hsl(0 0% 90%);
+  --tw-prose-pre-code: hsl(0 0% 85%);
+  --tw-prose-pre-bg: hsl(0 0% 8%);
+  --tw-prose-th-borders: hsl(0 0% 25%);
+  --tw-prose-td-borders: hsl(0 0% 18%);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 25%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 35%);
+}
+
+/* KaTeX overrides for dark mode */
+.katex {
+  color: hsl(0 0% 90%) !important;
+}
