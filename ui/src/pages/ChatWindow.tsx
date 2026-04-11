@@ -226,7 +226,7 @@ function ChatContent() {
 
   return (
     <div
-      className="flex h-screen w-full overflow-hidden"
+      className="flex w-screen h-screen overflow-hidden"
       style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
       {/* Sidebar */}

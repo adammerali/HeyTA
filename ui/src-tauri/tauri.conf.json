@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "overlay",
@@ -21,7 +22,11 @@
         "alwaysOnTop": true,
         "resizable": false,
         "shadow": false,
-        "url": "/"
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "acceptFirstMouse": true,
+        "focus": false,
+        "center": true
       }
     ],
     "security": {

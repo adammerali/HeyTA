@@ -1,133 +1,113 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Mic, MessageSquare } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { GripVerticalIcon, Mic, MicOff, MessageSquareIcon } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 type Status = "ready" | "listening" | "thinking";
 
-export default function OverlayBar() {
+const App = () => {
   const [status, setStatus] = useState<Status>("ready");
+  const isListening = status === "listening";
 
-  // Listen for status updates from the speech module via Tauri events
-  useEffect(() => {
-    // Placeholder: in production the speech module emits tauri events
-    // and we'd listen with `listen("ta-status", handler)` here
-  }, []);
+  const startDrag = () => {
+    getCurrentWindow().startDragging();
+  };
 
-  async function openChat() {
+  const openDashboard = async () => {
     try {
       await invoke("open_chat_window");
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      console.error("Failed to open dashboard:", error);
     }
-  }
-
-  const statusLabel: Record<Status, string> = {
-    ready: "Ready",
-    listening: "Listening...",
-    thinking: "Thinking...",
   };
 
-  const dotColor: Record<Status, string> = {
-    ready: "bg-emerald-400",
-    listening: "bg-blue-400",
-    thinking: "bg-amber-400",
-  };
-
-  const pulse = status !== "ready";
+  const dotColor =
+    status === "ready" ? "#34d399" : isListening ? "#60a5fa" : "#fbbf24";
 
   return (
-    <div
-      className="w-full h-full flex items-center justify-center"
-      style={{ background: "transparent" }}
-    >
-      <div
-        data-tauri-drag-region
-        className="flex items-center gap-3 px-5 py-2 rounded-full select-none cursor-default"
-        style={{
-          background: "rgba(23, 23, 23, 0.85)",
-          backdropFilter: "blur(20px)",
-          WebkitBackdropFilter: "blur(20px)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
-          height: "42px",
-        }}
-      >
-        {/* Logo / name */}
-        <div className="flex items-center gap-2">
-          <div
-            className="w-6 h-6 rounded-md flex items-center justify-center text-white font-bold text-xs"
-            style={{ background: "var(--accent)" }}
-          >
-            TA
-          </div>
-          <span className="text-white font-semibold text-sm tracking-wide">
-            Hey TA
-          </span>
+    // Copied from Pluely pages/app/index.tsx
+    <div className="w-screen h-screen flex overflow-hidden justify-center items-start">
+      <Card className="w-full flex flex-row items-center gap-2 p-2">
+
+        {/* DragButton — copied from Pluely DragButton.tsx */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="-ml-[2px] w-fit cursor-grab active:cursor-grabbing"
+          data-tauri-drag-region
+          onMouseDown={startDrag}
+        >
+          <GripVerticalIcon className="h-4 w-4 pointer-events-none" />
+        </Button>
+
+        {/* TA badge */}
+        <div
+          className="w-6 h-6 rounded-md flex items-center justify-center text-white font-bold shrink-0 text-[9px] tracking-wide"
+          style={{ background: "#10a37f" }}
+        >
+          TA
         </div>
 
-        <div
-          className="w-px h-5"
-          style={{ background: "rgba(255,255,255,0.12)" }}
-        />
+        {/* Name */}
+        <span className="text-sm font-semibold whitespace-nowrap">Hey TA</span>
+
+        <div className="w-px h-4 bg-border shrink-0" />
 
         {/* Status indicator */}
-        <div className="flex items-center gap-2">
-          <div className="relative flex items-center justify-center">
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <div className="relative w-2 h-2 shrink-0">
+            {status !== "ready" && (
+              <span
+                className="absolute inset-0 rounded-full animate-ping opacity-75"
+                style={{ background: dotColor }}
+              />
+            )}
             <span
-              className={`w-2 h-2 rounded-full ${dotColor[status]} ${pulse ? "animate-ping absolute" : ""}`}
+              className="absolute inset-0 rounded-full"
+              style={{ background: dotColor }}
             />
-            <span className={`w-2 h-2 rounded-full ${dotColor[status]}`} />
           </div>
-          <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-            {statusLabel[status]}
+          <span className="text-xs text-muted-foreground whitespace-nowrap">
+            {status === "ready" ? "Ready" : isListening ? "Listening…" : "Thinking…"}
           </span>
         </div>
 
-        <div
-          className="w-px h-5"
-          style={{ background: "rgba(255,255,255,0.12)" }}
-        />
+        <div className="w-px h-4 bg-border shrink-0" />
 
-        {/* Mic icon */}
-        <button
-          onClick={() =>
-            setStatus((s) => (s === "listening" ? "ready" : "listening"))
-          }
-          className="w-7 h-7 rounded-full flex items-center justify-center transition-colors"
-          style={{
-            background:
-              status === "listening"
-                ? "rgba(59,130,246,0.25)"
-                : "transparent",
-            color:
-              status === "listening"
-                ? "rgb(147,197,253)"
-                : "var(--text-secondary)",
-          }}
-          title="Toggle listening"
+        {/* Mic toggle */}
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "cursor-pointer h-8 w-8",
+            isListening && "bg-blue-500/20 text-blue-300 hover:bg-blue-500/30"
+          )}
+          title={isListening ? "Stop listening" : "Start listening"}
+          onClick={() => setStatus((s) => (s === "listening" ? "ready" : "listening"))}
         >
-          <Mic size={13} />
-        </button>
+          {isListening ? (
+            <MicOff className="h-4 w-4" />
+          ) : (
+            <Mic className="h-4 w-4" />
+          )}
+        </Button>
 
-        {/* Open chat */}
-        <button
-          onClick={openChat}
-          className="w-7 h-7 rounded-full flex items-center justify-center transition-colors"
-          style={{
-            background: "transparent",
-            color: "var(--text-secondary)",
-          }}
-          onMouseEnter={(e) =>
-            (e.currentTarget.style.color = "var(--text-primary)")
-          }
-          onMouseLeave={(e) =>
-            (e.currentTarget.style.color = "var(--text-secondary)")
-          }
-          title="Open chat"
+        {/* Open chat — mirrors Pluely's "Open Dev Space" button */}
+        <Button
+          size="icon"
+          className="cursor-pointer h-8 w-8"
+          title="Open Chat"
+          onClick={openDashboard}
         >
-          <MessageSquare size={13} />
-        </button>
-      </div>
+          <MessageSquareIcon className="h-4 w-4" />
+        </Button>
+
+      </Card>
     </div>
   );
-}
+};
+
+export default App;
