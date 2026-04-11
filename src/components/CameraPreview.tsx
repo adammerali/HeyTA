@@ -1,3 +1,13 @@
+/**
+ * CameraPreview — Live Webcam Feed with Toggle Control
+ *
+ * Shows the webcam feed in the hover popover with a LIVE indicator badge.
+ * Uses the `setVideoRef` callback pattern from useCamera to connect the
+ * video element to the shared MediaStream without duplicating the stream.
+ *
+ * When the camera is off, displays a placeholder with a VideoOff icon.
+ * The toggle button in the bottom-right corner starts/stops the camera.
+ */
 import { Video, VideoOff } from "lucide-react";
 
 interface CameraPreviewProps {

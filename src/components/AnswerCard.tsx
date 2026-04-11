@@ -1,3 +1,24 @@
+/**
+ * AnswerCard — Compact Answer Toast in the Overlay Bar
+ *
+ * ## Purpose
+ *
+ * After the AI responds, this card appears below the overlay bar showing
+ * the spoken_blurb text. It auto-dismisses after 15 seconds to avoid
+ * cluttering the screen, but the student can expand it or click through
+ * to the full explanation in the side panel.
+ *
+ * ## Design Decision: 15-Second Auto-Dismiss
+ *
+ * The card shows a short hint that's also being spoken aloud. After TTS
+ * finishes (~5-10s), the hint is no longer needed on screen. The 15s timer
+ * gives extra time for re-reading while keeping the overlay clean.
+ *
+ * ## Re-trigger Behavior
+ *
+ * When a new response arrives (spokenBlurb changes), the card resets:
+ * dismissed state clears, expanded state resets, and the timer restarts.
+ */
 import { useState, useEffect } from "react";
 import { ChevronDown, ChevronUp, Volume2 } from "lucide-react";
 

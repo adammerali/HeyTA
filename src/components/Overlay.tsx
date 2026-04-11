@@ -1,3 +1,37 @@
+/**
+ * Overlay — Screen Capture Region Selection
+ *
+ * ## Purpose
+ *
+ * When the student wants to capture a problem from their screen, this
+ * component renders a fullscreen transparent overlay on each monitor.
+ * The student draws a rectangle to select the region, which is then
+ * cropped from the pre-captured screenshot and sent as context.
+ *
+ * ## Design Decision: Fullscreen Transparent Window
+ *
+ * We use Tauri windows (one per monitor) rather than browser-based
+ * selection because:
+ * 1. Can overlay on top of ALL applications (not just the webview)
+ * 2. Captures the actual screen content via xcap before showing the overlay
+ * 3. Works across multiple monitors with correct DPI scaling
+ *
+ * ## Coordinate System
+ *
+ * The user draws in logical (CSS) pixels. Before sending to Rust, we multiply
+ * by `devicePixelRatio` to convert to physical pixels, matching the xcap
+ * capture which operates in physical pixel space.
+ *
+ * ## Minimum Selection Size
+ *
+ * Selections smaller than 10×10 pixels are treated as accidental clicks
+ * and trigger cancellation instead of capture.
+ *
+ * ## Custom Cursor
+ *
+ * We hide the system cursor and render a custom crosshair via Lucide's
+ * MousePointer2 icon for a cleaner, more precise selection experience.
+ */
 import React, { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MousePointer2 } from "lucide-react";

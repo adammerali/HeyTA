@@ -47,7 +47,6 @@ Hey TA is a Tauri 2 desktop application with a Rust backend and React 19 fronten
 | Math rendering | KaTeX via rehype-katex | Fast LaTeX rendering in browser |
 | Markdown | react-markdown + remark-gfm + remark-math | Full GFM + math support |
 | Testing | Vitest (frontend) + Rust `#[cfg(test)]` (backend) | Fast, native test runners for both stacks |
-| CI | GitHub Actions | Automated build verification on every push/PR |
 
 ## Data Flow
 

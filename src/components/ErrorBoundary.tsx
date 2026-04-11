@@ -1,3 +1,14 @@
+/**
+ * ErrorBoundary — React Error Boundary for Crash Recovery
+ *
+ * Catches unhandled JavaScript errors in the React tree and displays
+ * a monospace error screen instead of a blank white page. This is
+ * critical for a desktop app where the user can't refresh the page —
+ * without this, an unhandled error would leave a frozen, unresponsive window.
+ *
+ * The error message and stack trace are displayed for debugging.
+ * In production, this should be extended with error reporting.
+ */
 import React from "react";
 
 interface State {

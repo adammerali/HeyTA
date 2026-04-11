@@ -1,3 +1,42 @@
+/**
+ * OverlayBar — The Primary UI Surface (Floating Control Bar)
+ *
+ * ## Architecture
+ *
+ * This is the most complex component in the app. It manages:
+ * - Voice recording loop (persistent MediaStream + chunked MediaRecorder)
+ * - Wake phrase detection pipeline (Whisper STT → phrase matching → question extraction)
+ * - Multi-utterance capture mode ("Hey TA" → accumulate → "stop" → submit)
+ * - Camera toggle integration with the workspace compositor
+ * - Screenshot capture via native macOS screencapture
+ * - API key entry popover
+ * - Status indicator state machine (idle → listening → transcribing → thinking → speaking)
+ * - Hover popovers with camera preview, mic visualizer, and screenshot display
+ *
+ * ## Design Decision: Recording Loop Architecture
+ *
+ * We use a continuous recording loop rather than VAD-triggered recording:
+ * 1. Start MediaRecorder, record for 4 seconds, stop
+ * 2. On stop: immediately start next chunk (no gap), transcribe previous in parallel
+ * 3. Check transcript for wake phrase or stop phrase
+ *
+ * This overlapping approach ensures zero gaps in audio capture. The 4-second chunk
+ * size balances latency (shorter = faster response) vs. accuracy (Whisper needs
+ * enough context to transcribe accurately).
+ *
+ * ## Design Decision: Persistent MediaStream
+ *
+ * We acquire the MediaStream once and reuse it across all recording chunks.
+ * Creating a new stream per chunk would cause the macOS mic permission prompt
+ * to flash repeatedly and adds ~200ms latency per chunk for stream negotiation.
+ *
+ * ## Status State Machine
+ *
+ * The display status combines local state with AppContext status:
+ * - If AppContext says "thinking" or "speaking", that overrides local status
+ * - Otherwise, local status (idle, listening, camera_active, error) is used
+ * This ensures the overlay reflects the global tutoring flow state.
+ */
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";

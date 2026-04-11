@@ -106,7 +106,6 @@ HeyTA/
 │       ├── capture.rs      # Screen capture (xcap, multi-monitor DPI)
 │       ├── window.rs       # Window management
 │       └── error.rs        # Typed error enum (AppError)
-├── .github/workflows/      # CI pipeline (GitHub Actions)
 ├── docs/                   # Project plan, architecture, masterplan
 └── speech/                 # Original Python prototype (reference)
 ```

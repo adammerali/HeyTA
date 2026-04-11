@@ -1,14 +1,35 @@
-//! Window management — overlay positioning, dashboard lifecycle, and global shortcuts.
+//! Window management — positioning, creation, and lifecycle control.
+//!
+//! # Window Topology
+//!
+//! Hey TA uses a multi-window architecture where each window has a distinct role:
+//!
+//! | Window | Type | Visibility | Purpose |
+//! |--------|------|------------|---------|
+//! | `overlay` | NSPanel | Always visible | Floating control bar |
+//! | `dashboard` | Standard | Toggle on demand | Response, history, settings |
+//! | `capture-overlay-{N}` | Transparent | Ephemeral | Region selection during screenshot |
+//!
+//! # Hide-on-Close Pattern
+//!
+//! The dashboard intercepts `CloseRequested` and hides instead of destroying.
+//! This preserves React state (current tab, scroll position, streaming response)
+//! across toggle cycles. Destroying and recreating would reset all state and
+//! cause a visible flash as the webview re-renders.
 
 use tauri::{App, AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 #[cfg(target_os = "macos")]
 use tauri::LogicalPosition;
 
-/// Vertical offset (in physical pixels) from the top of the screen for the overlay bar.
+/// Vertical offset from the screen top for the overlay bar (physical pixels).
+/// 54px clears the macOS menu bar (22px) plus a comfortable margin.
 const TOP_OFFSET: i32 = 54;
 
-/// Position and configure the main overlay window at app startup.
+/// Position the main overlay window at the top-center of the primary monitor.
+///
+/// Called once during app setup. The overlay is centered horizontally and offset
+/// from the top by `TOP_OFFSET` to sit just below the macOS menu bar.
 pub fn setup_main_window(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app
         .get_webview_window("overlay")
@@ -37,7 +58,11 @@ fn position_window_top_center(
     Ok(())
 }
 
-/// Resize the overlay bar height dynamically (e.g., when popovers expand).
+/// Dynamically resize the overlay bar height.
+///
+/// Called by the frontend when popovers (camera preview, mic visualizer, API key entry)
+/// expand or collapse. The width stays fixed at 680 logical pixels (the overlay bar's
+/// design width), only the height changes.
 #[tauri::command]
 pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
@@ -48,13 +73,16 @@ pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<()
     Ok(())
 }
 
-/// Show the dashboard window, creating it if it doesn't exist yet.
+/// Show the dashboard window (creating it if needed).
 #[tauri::command]
 pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     show_dashboard_window(&app)
 }
 
 /// Toggle dashboard visibility — show if hidden, hide if visible.
+///
+/// This is the primary entry point for the Cmd+Shift+P shortcut and the
+/// panel button in the overlay bar.
 #[tauri::command]
 pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dw) = app.get_webview_window("dashboard") {
@@ -75,9 +103,18 @@ pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Create the dashboard window with macOS-native title bar styling.
-/// The window is created hidden and intercepts close events to hide
-/// instead of destroy, preserving state across toggle cycles.
+/// Create the dashboard window with platform-appropriate styling.
+///
+/// # macOS-Specific Styling
+///
+/// On macOS, the dashboard uses:
+/// - `hidden_title(true)` + `TitleBarStyle::Overlay`: Creates a clean look where
+///   the traffic lights (close/minimize/fullscreen) sit directly on the content
+/// - `traffic_light_position(14, 18)`: Positions traffic lights to align with
+///   the custom title bar area in the React UI
+///
+/// The window starts hidden and is shown explicitly after creation. This avoids
+/// the brief flash of an empty webview while React mounts.
 pub fn create_dashboard_window<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WebviewWindow<R>, tauri::Error> {
@@ -113,7 +150,11 @@ pub fn create_dashboard_window<R: Runtime>(
     Ok(window)
 }
 
-/// Intercept close events on the dashboard to hide instead of destroy.
+/// Intercept close events to hide instead of destroy.
+///
+/// Without this, clicking the red traffic light would destroy the window,
+/// losing all React state. With it, the window just hides — the next toggle
+/// shows it instantly with all state preserved.
 fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
     let wc = window.clone();
     window.on_window_event(move |event| {

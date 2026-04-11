@@ -92,7 +92,7 @@ Unlike existing tools, Hey TA operates *inside* the student's workflow rather th
 | Post-session recap generation | Implemented | P1 |
 | Manual text input fallback | Implemented | P1 |
 | ModelProvider abstraction (vendor-agnostic) | Implemented | P1 |
-| CI pipeline (GitHub Actions) | Implemented | P1 |
+| Typed error handling (AppError enum) | Implemented | P1 |
 | Unit tests (Vitest + Rust #[cfg(test)]) | Implemented | P1 |
 
 ## Out of Scope (v1)

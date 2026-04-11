@@ -1,10 +1,42 @@
+/**
+ * AI Response Streaming Service
+ *
+ * Bridges Tauri SSE events to an async generator that the React UI consumes.
+ *
+ * ## Design Decision: Async Queue vs. Polling
+ *
+ * The original implementation used a `sleep(80ms)` polling loop to check for
+ * new chunks — a busy-wait anti-pattern that introduced unnecessary latency
+ * (up to 80ms per token) and wasted CPU cycles. We replaced it with a
+ * Promise-based async queue where:
+ *
+ * 1. Tauri event listener pushes chunks into a buffer
+ * 2. If the consumer is waiting, its Promise resolves immediately
+ * 3. If no consumer is waiting, chunks accumulate in the buffer
+ *
+ * This achieves zero-latency delivery (chunks yield the instant they arrive)
+ * with zero CPU overhead when idle.
+ *
+ * ## Cancellation Flow
+ *
+ * AbortSignal propagation:
+ * ```
+ * User clicks new question → AbortController.abort()
+ *   → signal fires "abort" event → queue.complete() (stops iteration)
+ *   → invoke("cancel_stream") → Rust sets AtomicBool → SSE loop breaks
+ * ```
+ */
+
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 /**
- * Promise-based async queue that replaces the polling sleep pattern.
- * Chunks pushed by event listeners are yielded to consumers immediately
- * via a pending promise resolver, eliminating busy-wait latency.
+ * Promise-based async queue — the core primitive that eliminates polling.
+ *
+ * The key insight: when the consumer calls `iterate()` and no items are
+ * available, we create a Promise and store its resolver. When a producer
+ * calls `push()`, it resolves that Promise, immediately unblocking the
+ * consumer's `await`. This is essentially a single-consumer channel.
  */
 function createAsyncQueue<T>(): {
   push: (item: T) => void;
@@ -38,15 +70,17 @@ function createAsyncQueue<T>(): {
 
   async function* iterate(): AsyncGenerator<T> {
     while (true) {
+      // Drain all buffered items before checking for completion
       while (buffer.length > 0) {
         yield buffer.shift()!;
       }
 
       if (done) break;
 
+      // No items available — suspend until push() or complete() is called
       await new Promise<void>((resolve, reject) => {
         if (buffer.length > 0 || done) {
-          resolve();
+          resolve(); // Race condition guard: items arrived between check and await
         } else {
           waiting = { resolve, reject };
         }
@@ -61,8 +95,19 @@ function createAsyncQueue<T>(): {
 
 /**
  * Stream AI response chunks from GPT-4o via Tauri SSE events.
- * Uses a zero-latency async queue instead of polling — chunks are
- * yielded to the consumer as soon as the Tauri event fires.
+ *
+ * Yields individual content tokens as they arrive from the model.
+ * The caller accumulates them into a full response string.
+ *
+ * @example
+ * ```ts
+ * let fullText = "";
+ * for await (const chunk of streamAIResponse({ apiKey, messages, model })) {
+ *   fullText += chunk;
+ *   setStreamedResponse(fullText);
+ * }
+ * const parsed = parseTutoringResponse(fullText);
+ * ```
  */
 export async function* streamAIResponse(params: {
   apiKey: string;
@@ -76,6 +121,8 @@ export async function* streamAIResponse(params: {
 
   const queue = createAsyncQueue<string>();
 
+  // Set up Tauri event listeners BEFORE invoking the command to avoid
+  // missing early chunks due to a race condition
   const unlisten = await listen("chat_stream_chunk", (event) => {
     queue.push(event.payload as string);
   });
@@ -83,6 +130,8 @@ export async function* streamAIResponse(params: {
     queue.complete();
   });
 
+  // Fire the Rust command without awaiting — it runs in the background
+  // while we yield chunks to the consumer as they arrive
   const invokePromise = invoke("chat_stream_response", {
     apiKey,
     messagesJson: JSON.stringify(messages),
@@ -91,6 +140,7 @@ export async function* streamAIResponse(params: {
     queue.error(new Error(String(err)));
   });
 
+  // Wire AbortSignal to queue completion so iteration stops immediately
   const abortHandler = () => queue.complete();
   signal?.addEventListener("abort", abortHandler);
 
@@ -108,6 +158,10 @@ export async function* streamAIResponse(params: {
   }
 }
 
+/**
+ * Non-streaming chat completion — used for recap generation and other
+ * background requests where token-by-token streaming isn't needed.
+ */
 export async function sendSimpleMessage(params: {
   apiKey: string;
   messages: object[];

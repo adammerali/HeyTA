@@ -1,3 +1,17 @@
+/**
+ * InteractionTimeline — Chronological Session History Display
+ *
+ * Renders a vertical timeline of all question/response interactions in the
+ * current session. Each entry shows:
+ * - Timestamp
+ * - The student's question
+ * - Expandable response (Markdown+LaTeX rendered)
+ * - Workspace snapshot thumbnail (if camera was active)
+ * - Replay button to re-speak the hint via TTS
+ *
+ * The timeline uses a left-border with dots design pattern for clear
+ * chronological ordering. Empty state encourages the student to start.
+ */
 import type { Interaction } from "@/types";
 import { Markdown } from "./Markdown";
 import { ChevronDown, ChevronRight, Volume2 } from "lucide-react";

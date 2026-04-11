@@ -1,3 +1,22 @@
+/**
+ * AudioVisualizer — Real-Time Microphone Frequency Bars
+ *
+ * Renders a canvas-based audio visualization showing 16 frequency bars
+ * that respond to the microphone input in real time. Displayed in the
+ * mic hover popover to give visual confirmation that audio is being captured.
+ *
+ * ## Technical Approach
+ *
+ * Uses Web Audio API's AnalyserNode with FFT size 64 (32 frequency bins).
+ * We sample 16 evenly-spaced bins and map their 0-255 byte values to
+ * bar heights with a gradient fill. The animation runs at requestAnimationFrame
+ * rate (~60fps) for smooth visual feedback.
+ *
+ * ## Lifecycle
+ *
+ * The AudioContext and AnalyserNode are created when the stream becomes active
+ * and destroyed on cleanup. The canvas clears itself when the stream stops.
+ */
 import { useEffect, useRef } from "react";
 
 interface AudioVisualizerProps {

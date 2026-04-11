@@ -1,3 +1,42 @@
+/**
+ * AppContext — Global Application State and Orchestration
+ *
+ * ## Responsibility
+ *
+ * This context is the central orchestration point that coordinates:
+ * - API key management (cross-window sync via localStorage)
+ * - Camera lifecycle (useCamera hook)
+ * - TTS playback (useTTS hook)
+ * - AI question/response flow (streaming, parsing, logging)
+ * - Conversation history (rolling window for follow-up context)
+ * - Session logging (interactions for timeline and recap)
+ *
+ * ## Design Decision: Single Context vs. Multiple Contexts
+ *
+ * We use a single AppContext rather than splitting into CameraContext,
+ * VoiceContext, etc. because the tutoring flow is tightly coupled:
+ * asking a question requires camera frame + API key + conversation history.
+ * Splitting would require cross-context coordination that adds complexity
+ * without meaningful separation of concerns.
+ *
+ * ## Conversation History Window
+ *
+ * We maintain a rolling window of up to 10 conversation entries. The context
+ * builder uses the last 3 for the GPT-4o prompt (keeping it under 8K tokens),
+ * but we store 10 so the interaction timeline has more history to display.
+ *
+ * ## Streaming Flow
+ *
+ * The `askQuestion` flow:
+ * 1. Abort any in-flight request (AbortController)
+ * 2. Get the best stable webcam frame from the compositor
+ * 3. Build the multimodal message array
+ * 4. Stream the response via async generator
+ * 5. Parse the JSON response (spoken_blurb + written_explanation)
+ * 6. Speak the blurb via TTS
+ * 7. Log the interaction for timeline and recap
+ */
+
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
 import type { AppStatus, TutoringResponse, Interaction, ConversationEntry } from "@/types";
 import { useCamera } from "@/hooks/useCamera";
@@ -47,7 +86,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("heyta_api_key", key);
   }, []);
 
-  // Sync API key across windows via storage events
+  // Cross-window API key synchronization (see useApiKeySync for full explanation)
   useEffect(() => {
     const handler = (e: StorageEvent) => {
       if (e.key === "heyta_api_key" && e.newValue !== null) {
@@ -56,7 +95,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener("storage", handler);
 
-    // Also poll for changes (storage events don't fire in same window)
     const interval = setInterval(() => {
       const stored = localStorage.getItem("heyta_api_key") || "";
       setApiKeyState((prev) => (stored !== prev ? stored : prev));
@@ -71,14 +109,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const camera = useCamera();
   const tts = useTTS(apiKey);
 
+  /**
+   * Core tutoring flow — ask a question and stream the AI response.
+   *
+   * This is the heart of Hey TA: it assembles context from all sources
+   * (camera, screenshot, history, transcript), streams the response,
+   * parses the dual-output format, speaks the hint, and logs everything.
+   */
   const askQuestion = useCallback(
     async (question: string) => {
       if (!apiKey || !question.trim()) return;
 
+      // Auto-start session on first question
       if (!getCurrentSessionId()) {
         startSession();
       }
 
+      // Abort any in-flight request to prevent overlapping responses
       if (abortRef.current) abortRef.current.abort();
       abortRef.current = new AbortController();
 
@@ -87,6 +134,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setStreamedResponse("");
       setCurrentResponse(null);
 
+      // Get the best stable frame from the compositor's rolling buffer
       const workspaceImage = getBestFrame();
 
       const messages = buildMessages({
@@ -99,6 +147,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       let fullText = "";
       try {
+        // Stream tokens from GPT-4o and update the UI progressively
         for await (const chunk of streamAIResponse({
           apiKey,
           messages,
@@ -112,12 +161,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         if (abortRef.current?.signal.aborted) return;
 
+        // Parse the model's JSON response into spoken + written components.
+        // parseTutoringResponse has 5 fallback strategies for robustness.
         const parsed = parseTutoringResponse(fullText);
         setCurrentResponse(parsed);
 
+        // Speak the short hint immediately for fast perceived response
         setStatus("speaking");
         tts.speak(parsed.spoken_blurb);
 
+        // Log the interaction for the timeline and future recap generation
         logInteraction({
           userQuestion: question,
           spokenResponse: parsed.spoken_blurb,
@@ -128,6 +181,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         setInteractions(getSessionHistory());
 
+        // Add to conversation history for follow-up context
         conversationHistoryRef.current.push({
           role: "user",
           question,
@@ -146,6 +200,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
       } finally {
         setIsStreaming(false);
+        // Return to idle after 3 seconds (gives "speaking" status time to display)
         setTimeout(() => setStatus((s) => (s === "error" ? s : "idle")), 3000);
       }
     },

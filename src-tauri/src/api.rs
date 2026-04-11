@@ -1,5 +1,20 @@
-//! OpenAI API integration — all external HTTP requests route through Rust
-//! to bypass CORS restrictions and keep API keys out of the browser network inspector.
+//! OpenAI API integration — all external HTTP requests route through Rust.
+//!
+//! # Architecture Decision: Rust-Side HTTP
+//!
+//! Every OpenAI call (Whisper, GPT-4o, TTS) goes through this module instead of
+//! the browser's `fetch()`. This solves three problems simultaneously:
+//!
+//! 1. **CORS bypass**: OpenAI's API doesn't set CORS headers for browser origins.
+//!    Browser fetch would fail. Rust's reqwest has no CORS restrictions.
+//!
+//! 2. **API key security**: The key never appears in browser DevTools network tab.
+//!    While localStorage storage is a v1 simplification, at least network traffic
+//!    is invisible to casual inspection.
+//!
+//! 3. **Streaming control**: SSE streaming via reqwest gives us byte-level control
+//!    over the stream, enabling the cancellation flag pattern and chunk-by-chunk
+//!    parsing that would be harder with browser EventSource.
 
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::StreamExt;
@@ -11,8 +26,16 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::{classify_api_error, AppError};
 
-/// Holds a cancellation flag for the active SSE stream, allowing the
-/// frontend to abort an in-flight GPT-4o request from the Rust side.
+/// Shared cancellation flag for the active SSE stream.
+///
+/// # Design Decision: Atomic Bool vs. Channel
+///
+/// We use an AtomicBool rather than a tokio channel because:
+/// - Only one stream is active at a time (single-user desktop app)
+/// - The flag is checked on every SSE chunk (cheap atomic load)
+/// - No need for the complexity of channel lifecycle management
+/// - The frontend calls `cancel_stream` which sets this to true;
+///   the SSE loop in `chat_stream_response` checks it and breaks out
 pub struct StreamCancelFlag(pub Arc<AtomicBool>);
 
 impl Default for StreamCancelFlag {
@@ -21,6 +44,9 @@ impl Default for StreamCancelFlag {
     }
 }
 
+/// Structured response from the Whisper transcription endpoint.
+/// Uses `success` flag pattern rather than Result because the frontend
+/// needs to distinguish "API error" from "network error" for UI messaging.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AudioResponse {
     pub success: bool,
@@ -30,15 +56,25 @@ pub struct AudioResponse {
 
 /// Transcribe an audio blob via the OpenAI Whisper API.
 ///
-/// Accepts base64-encoded audio (with or without a data-URI prefix),
-/// converts to bytes, and sends as multipart form to `/v1/audio/transcriptions`.
-/// Returns a structured response with the transcript or an error message.
+/// # Audio Format Handling
+///
+/// WKWebView (macOS Tauri's webview) doesn't support `audio/webm` recording —
+/// it outputs `audio/mp4` instead. The frontend detects the supported MIME type
+/// at startup and sends the correct type here. We map MIME types to file extensions
+/// because Whisper uses the extension to determine the codec.
+///
+/// # Base64 Transport
+///
+/// Audio is sent as base64 over Tauri's IPC because Tauri invoke doesn't support
+/// binary blob arguments directly. The overhead (~33% size increase) is acceptable
+/// for ~4-second audio chunks (~50KB base64 for a 4s mp4 recording).
 #[tauri::command]
 pub async fn transcribe_audio(
     audio_base64: String,
     api_key: String,
     mime_type: Option<String>,
 ) -> Result<AudioResponse, AppError> {
+    // Strip data-URI prefix if present (e.g., "data:audio/mp4;base64,...")
     let trimmed = audio_base64.trim();
     let b64_data = if let Some(idx) = trimmed.find(',') {
         &trimmed[idx + 1..]
@@ -72,6 +108,8 @@ pub async fn transcribe_audio(
         .send()
         .await?;
 
+    // Return API errors as AudioResponse (not Err) so the frontend can show
+    // user-friendly messages rather than generic error toasts
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let err = response.text().await.unwrap_or_default();
@@ -99,12 +137,32 @@ pub async fn transcribe_audio(
 
 /// Stream a chat completion from GPT-4o via Server-Sent Events (SSE).
 ///
-/// The function opens a streaming HTTP connection to OpenAI, parses each
-/// SSE `data:` line, and emits `chat_stream_chunk` Tauri events as content
-/// tokens arrive. A final `chat_stream_complete` event carries the full text.
+/// # Streaming Architecture
 ///
-/// The SSE loop checks a shared `StreamCancelFlag` on every chunk so the
-/// frontend can abort mid-stream via the `cancel_stream` command.
+/// This function bridges Rust's async HTTP streaming to the frontend via Tauri events:
+///
+/// ```text
+/// OpenAI SSE stream → reqwest bytes_stream → parse SSE lines → emit Tauri events
+///                                                                    ↓
+///                                              Frontend async queue ← listen("chat_stream_chunk")
+/// ```
+///
+/// Each SSE `data:` line is parsed to extract the content delta token. We emit two
+/// event types:
+/// - `chat_stream_chunk`: Individual content token (e.g., "The", " derivative", " is")
+/// - `chat_stream_complete`: Full accumulated response text (signals stream end)
+///
+/// # Cancellation
+///
+/// The `StreamCancelFlag` atomic bool is checked on every chunk. When the frontend
+/// calls `cancel_stream`, the flag is set to true and the loop breaks immediately.
+/// This is faster than dropping the reqwest response (which waits for TCP shutdown).
+///
+/// # SSE Parsing
+///
+/// SSE lines arrive as raw bytes that may split across TCP chunks. We maintain a
+/// `buffer` of incomplete data and only process complete lines (split on `\n`).
+/// The last incomplete segment is preserved for the next chunk iteration.
 #[tauri::command]
 pub async fn chat_stream_response(
     app: AppHandle,
@@ -114,6 +172,7 @@ pub async fn chat_stream_response(
 ) -> Result<String, AppError> {
     let messages: serde_json::Value = serde_json::from_str(&messages_json)?;
 
+    // Reset cancel flag at the start of each new stream
     let cancel = app.state::<StreamCancelFlag>();
     cancel.0.store(false, Ordering::SeqCst);
 
@@ -144,6 +203,7 @@ pub async fn chat_stream_response(
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
+        // Check cancellation flag before processing each chunk
         if cancel.0.load(Ordering::SeqCst) {
             let _ = app.emit("chat_stream_complete", &full_response);
             return Err(AppError::Cancelled);
@@ -153,6 +213,7 @@ pub async fn chat_stream_response(
         let chunk_str = String::from_utf8_lossy(&bytes);
         buffer.push_str(&chunk_str);
 
+        // Split on newlines; the last element may be incomplete (no trailing \n)
         let lines: Vec<&str> = buffer.split('\n').collect();
         let incomplete = lines.last().unwrap_or(&"").to_string();
 
@@ -170,7 +231,16 @@ pub async fn chat_stream_response(
 }
 
 /// Parse a single SSE line and extract the content delta if present.
-/// Returns `None` for non-data lines, empty data, and the `[DONE]` sentinel.
+///
+/// SSE format from OpenAI:
+/// ```text
+/// data: {"choices":[{"delta":{"content":"Hello"}}]}
+/// data: {"choices":[{"delta":{"role":"assistant"}}]}  // no content — skip
+/// data: [DONE]                                         // stream end — skip
+/// : keep-alive                                         // comment — skip
+/// ```
+///
+/// Returns `None` for non-content lines (comments, role deltas, DONE, empty).
 fn parse_sse_content(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let json_str = trimmed.strip_prefix("data: ")?;
@@ -191,14 +261,21 @@ fn parse_sse_content(line: &str) -> Option<String> {
 }
 
 /// Cancel an in-flight streaming response by setting the atomic cancel flag.
-/// The SSE loop in `chat_stream_response` checks this flag on every chunk.
+///
+/// Called by the frontend when the user aborts (e.g., via AbortController or
+/// starting a new question). The SSE loop checks this flag on every chunk and
+/// breaks immediately, avoiding wasted API tokens and network bandwidth.
 #[tauri::command]
 pub fn cancel_stream(app: AppHandle) {
     let cancel = app.state::<StreamCancelFlag>();
     cancel.0.store(true, Ordering::SeqCst);
 }
 
-/// Send a non-streaming chat completion request (used for recap generation).
+/// Send a non-streaming chat completion request.
+///
+/// Used for recap generation and other non-interactive requests where streaming
+/// adds complexity without UX benefit. The student isn't watching the recap
+/// generate token-by-token, so a single response is simpler and more reliable.
 #[tauri::command]
 pub async fn send_message_simple(
     api_key: String,
@@ -245,8 +322,17 @@ pub async fn send_message_simple(
 
 /// Fetch synthesized speech audio from the OpenAI TTS API.
 ///
-/// Returns the audio as a base64-encoded MP3 string for playback
-/// via the Web Audio API in the frontend.
+/// # Design Decision: Server-Side TTS via Rust
+///
+/// We fetch TTS through Rust rather than browser-side for consistency with our
+/// CORS-bypass architecture. The audio is returned as base64 MP3, decoded in the
+/// frontend via Web Audio API's `decodeAudioData`. The "shimmer" voice was chosen
+/// for its natural, encouraging tone that fits the tutoring context.
+///
+/// # Audio Format
+///
+/// MP3 was chosen over opus/ogg because Web Audio API's `decodeAudioData` has
+/// the most reliable MP3 support across all WebKit/WKWebView versions.
 #[tauri::command]
 pub async fn fetch_tts_audio(
     text: String,
@@ -282,8 +368,16 @@ pub async fn fetch_tts_audio(
     Ok(b64)
 }
 
-/// Take an interactive screenshot using the macOS `screencapture -i` command.
-/// Returns the captured image as a base64-encoded PNG string.
+/// Take an interactive screenshot using the native macOS `screencapture -i` command.
+///
+/// # Why `screencapture` Instead of xcap?
+///
+/// xcap captures the screen non-interactively. For the "capture a problem from your screen"
+/// workflow, we need the user to select a region. macOS's built-in `screencapture -i` provides
+/// the native selection UI (crosshair cursor, drag-to-select, Esc to cancel) with zero
+/// additional code. The file is written to a temp path, read back, base64-encoded, and cleaned up.
+///
+/// Returns `AppError::Cancelled` if the user presses Escape or clicks without dragging.
 #[tauri::command]
 pub async fn native_screenshot() -> Result<String, AppError> {
     let tmp = std::env::temp_dir().join(format!("heyta_screenshot_{}.png", uuid::Uuid::new_v4()));

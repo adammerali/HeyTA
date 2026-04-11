@@ -1,3 +1,31 @@
+/**
+ * SidePanel — Dashboard Window with Tabs
+ *
+ * ## Layout
+ *
+ * The dashboard provides a three-tab interface:
+ * - **Current**: Live streaming response or last response (Markdown+LaTeX)
+ * - **History**: Chronological interaction timeline with expandable entries
+ * - **Notes**: AI-generated session recap (generated on demand)
+ *
+ * ## Design Decision: Auto-Tab Switching
+ *
+ * When a new response starts streaming, we automatically switch to the
+ * "Current" tab. This ensures the student sees the response even if they
+ * were browsing history. The scroll position also auto-follows new content.
+ *
+ * ## Settings Panel
+ *
+ * When no API key is set, the dashboard shows a full-screen settings panel
+ * instead of the tabs. Once a key is entered, it auto-dismisses. The key
+ * syncs to the overlay bar via localStorage (cross-window sync).
+ *
+ * ## Manual Text Input
+ *
+ * The bottom input bar provides a keyboard fallback for when voice isn't
+ * practical (noisy environment, accessibility needs). It calls the same
+ * `askQuestion` function as the voice pipeline.
+ */
 import { useState, useRef, useEffect } from "react";
 import { useApp } from "@/contexts/AppContext";
 import { Markdown } from "@/components/Markdown";
