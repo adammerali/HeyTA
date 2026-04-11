@@ -35,10 +35,6 @@ def contains_stop_phrase(text: str) -> bool:
     return any(phrase in text_lower for phrase in STOP_PHRASES)
 
 
-def is_artifact(text: str) -> bool:
-    return text.strip().lower() in ARTIFACTS
-
-
 def extract_after_wake(text: str) -> str:
     """Return anything the student said after the wake phrase in the same utterance."""
     text_lower = text.lower()
@@ -47,6 +43,10 @@ def extract_after_wake(text: str) -> str:
         if idx != -1:
             return text[idx + len(phrase):].strip()
     return ""
+
+
+def is_artifact(text: str) -> bool:
+    return text.strip().lower() in ARTIFACTS
 
 
 def capture_webcam_frame() -> str | None:
@@ -101,11 +101,13 @@ class TAListener:
             return None
         return text
 
-    def run(self, on_question_callback):
+    def run(self, on_question_callback, on_activated=None):
         """
         Main loop. The mic records continuously in a background thread into audio_queue.
         This thread pulls chunks, transcribes them, and reacts to wake/stop phrases.
         Recording never pauses — no gap between wake phrase and question capture.
+
+        on_activated: optional zero-argument callback fired when the wake phrase is detected.
         """
         print("TA is listening... Say 'Hey TA' to begin, then 'Thank you' when done.\n")
 
@@ -118,6 +120,9 @@ class TAListener:
             print(f"Heard: {text}")
 
             if contains_wake_phrase(text):
+                if on_activated:
+                    on_activated()
+
                 inline = extract_after_wake(text)
                 print("\n[TA activated] What do you need help with?")
 

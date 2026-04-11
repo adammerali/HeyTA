@@ -4,3 +4,4 @@ anthropic
 python-dotenv
 openai
 opencv-python
+websockets
