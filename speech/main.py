@@ -3,11 +3,21 @@ from dotenv import load_dotenv
 from listener import TAListener
 from feedback import get_feedback
 from tts import speak
+import server
 
 load_dotenv()
 
 
 def handle_question(transcript: str, image_b64: str | None = None):
+    # Signal UI: open chat window and show user message
+    server.broadcast({"type": "status", "value": "thinking"})
+    server.broadcast({"type": "open_chat"})
+    server.broadcast({
+        "type": "user_message",
+        "content": transcript,
+        "image_b64": image_b64,
+    })
+
     print("Fetching feedback from TA...\n")
     print("-" * 60)
     print("TA:\n")
@@ -19,6 +29,10 @@ def handle_question(transcript: str, image_b64: str | None = None):
     ):
         print(sentence)
         speak(sentence)
+        server.broadcast({"type": "assistant_chunk", "content": sentence})
+
+    server.broadcast({"type": "assistant_done"})
+    server.broadcast({"type": "status", "value": "ready"})
 
     print("-" * 60)
     print()
@@ -30,8 +44,13 @@ def main():
         print("Create a .env file with:  ANTHROPIC_API_KEY=your_key_here")
         return
 
+    server.start()
+
     listener = TAListener()
-    listener.run(on_question_callback=handle_question)
+    listener.run(
+        on_question_callback=handle_question,
+        on_activated=lambda: server.broadcast({"type": "status", "value": "listening"}),
+    )
 
 
 if __name__ == "__main__":

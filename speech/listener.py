@@ -101,11 +101,13 @@ class TAListener:
             return None
         return text
 
-    def run(self, on_question_callback):
+    def run(self, on_question_callback, on_activated=None):
         """
         Main loop. The mic records continuously in a background thread into audio_queue.
         This thread pulls chunks, transcribes them, and reacts to wake/stop phrases.
         Recording never pauses — no gap between wake phrase and question capture.
+
+        on_activated: optional zero-argument callback fired when the wake phrase is detected.
         """
         print("TA is listening... Say 'Hey TA' to begin, then 'Thank you' when done.\n")
 
@@ -118,6 +120,8 @@ class TAListener:
             print(f"Heard: {text}")
 
             if contains_wake_phrase(text):
+                if on_activated:
+                    on_activated()
                 inline = extract_after_wake(text)
                 print("\n[TA activated] What do you need help with?")
 

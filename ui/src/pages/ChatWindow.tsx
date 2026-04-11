@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Plus,
@@ -9,6 +9,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { AppProvider, useApp, Message } from "../context/AppContext";
+import { useWebSocket, WsMessage } from "@/hooks/useWebSocket";
 
 const SYSTEM_PROMPT = `You are TA, an intelligent teaching assistant helping students understand course material in real time.
 
@@ -147,6 +148,7 @@ function ChatContent() {
     setActiveConversationId,
     createConversation,
     addMessage,
+    updateMessage,
   } = useApp();
 
   const [input, setInput] = useState("");
@@ -155,6 +157,51 @@ function ChatContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Track the active speech conversation and streaming assistant message
+  const speechConvoRef = useRef<string | null>(null);
+  const pendingAssistantIdRef = useRef<string | null>(null);
+
+  const handleWsMessage = useCallback((msg: WsMessage) => {
+    if (msg.type === "user_message") {
+      // Start or reuse a conversation for this speech session
+      const convoId = createConversation();
+      speechConvoRef.current = convoId;
+      pendingAssistantIdRef.current = null;
+
+      const msgData: Omit<Message, "id"> = {
+        role: "user",
+        content: msg.content,
+        timestamp: Date.now(),
+      };
+      if (msg.image_b64) {
+        msgData.screenshot = `data:image/jpeg;base64,${msg.image_b64}`;
+      }
+      addMessage(convoId, msgData);
+
+    } else if (msg.type === "assistant_chunk") {
+      const convoId = speechConvoRef.current;
+      if (!convoId) return;
+
+      if (!pendingAssistantIdRef.current) {
+        // First chunk — add a new assistant message
+        const id = addMessage(convoId, {
+          role: "assistant",
+          content: msg.content,
+          timestamp: Date.now(),
+        });
+        pendingAssistantIdRef.current = id;
+      } else {
+        // Subsequent chunks — append with a space
+        updateMessage(convoId, pendingAssistantIdRef.current, " " + msg.content);
+      }
+
+    } else if (msg.type === "assistant_done") {
+      pendingAssistantIdRef.current = null;
+    }
+  }, [createConversation, addMessage, updateMessage]);
+
+  useWebSocket(handleWsMessage);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
