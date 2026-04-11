@@ -28,8 +28,7 @@ interface AppContextValue {
   setApiKey: (key: string) => void;
   setActiveConversationId: (id: string | null) => void;
   createConversation: () => string;
-  addMessage: (conversationId: string, message: Omit<Message, "id">) => string;
-  updateMessage: (conversationId: string, messageId: string, contentAppend: string) => void;
+  addMessage: (conversationId: string, message: Omit<Message, "id">) => void;
   activeConversation: Conversation | null;
 }
 
@@ -87,9 +86,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   function addMessage(
     conversationId: string,
     message: Omit<Message, "id">,
-  ): string {
-    const id = crypto.randomUUID();
-    const newMsg: Message = { ...message, id };
+  ) {
+    const newMsg: Message = { ...message, id: crypto.randomUUID() };
     setConversations((prev) =>
       prev.map((c) => {
         if (c.id !== conversationId) return c;
@@ -100,27 +98,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
               (message.content.length > 40 ? "…" : "")
             : c.title;
         return { ...c, messages: updatedMessages, title };
-      }),
-    );
-    return id;
-  }
-
-  function updateMessage(
-    conversationId: string,
-    messageId: string,
-    contentAppend: string,
-  ) {
-    setConversations((prev) =>
-      prev.map((c) => {
-        if (c.id !== conversationId) return c;
-        return {
-          ...c,
-          messages: c.messages.map((m) =>
-            m.id === messageId
-              ? { ...m, content: m.content + contentAppend }
-              : m,
-          ),
-        };
       }),
     );
   }
@@ -138,7 +115,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setActiveConversationId,
         createConversation,
         addMessage,
-        updateMessage,
         activeConversation,
       }}
     >
