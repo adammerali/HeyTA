@@ -1,10 +1,14 @@
+//! Window management — overlay positioning, dashboard lifecycle, and global shortcuts.
+
 use tauri::{App, AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 #[cfg(target_os = "macos")]
 use tauri::LogicalPosition;
 
+/// Vertical offset (in physical pixels) from the top of the screen for the overlay bar.
 const TOP_OFFSET: i32 = 54;
 
+/// Position and configure the main overlay window at app startup.
 pub fn setup_main_window(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app
         .get_webview_window("overlay")
@@ -16,6 +20,7 @@ pub fn setup_main_window(app: &mut App) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// Center a window horizontally on the primary monitor at the given Y offset.
 fn position_window_top_center(
     window: &WebviewWindow,
     y_offset: i32,
@@ -32,6 +37,7 @@ fn position_window_top_center(
     Ok(())
 }
 
+/// Resize the overlay bar height dynamically (e.g., when popovers expand).
 #[tauri::command]
 pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
@@ -42,11 +48,13 @@ pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<()
     Ok(())
 }
 
+/// Show the dashboard window, creating it if it doesn't exist yet.
 #[tauri::command]
 pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     show_dashboard_window(&app)
 }
 
+/// Toggle dashboard visibility — show if hidden, hide if visible.
 #[tauri::command]
 pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dw) = app.get_webview_window("dashboard") {
@@ -67,6 +75,9 @@ pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Create the dashboard window with macOS-native title bar styling.
+/// The window is created hidden and intercepts close events to hide
+/// instead of destroy, preserving state across toggle cycles.
 pub fn create_dashboard_window<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WebviewWindow<R>, tauri::Error> {
@@ -102,6 +113,7 @@ pub fn create_dashboard_window<R: Runtime>(
     Ok(window)
 }
 
+/// Intercept close events on the dashboard to hide instead of destroy.
 fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
     let wc = window.clone();
     window.on_window_event(move |event| {
@@ -114,6 +126,7 @@ fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
     });
 }
 
+/// Show (or create + show) the dashboard window with focus.
 pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(dw) = app.get_webview_window("dashboard") {
         dw.show().map_err(|e| format!("Failed to show: {}", e))?;

@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * Transcribe an audio blob via the Rust backend (OpenAI Whisper).
+ *
+ * Converts the blob to base64 in chunks to avoid call-stack overflow,
+ * then invokes the Rust `transcribe_audio` command. Handles specific
+ * HTTP error codes (401, 429, 500+) with user-friendly messages.
+ */
 export async function fetchSTT(audio: Blob, apiKey: string): Promise<string> {
+  if (!apiKey || !apiKey.startsWith("sk-")) {
+    throw new Error("Invalid API key format — must start with 'sk-'");
+  }
+
   const arrayBuffer = await audio.arrayBuffer();
   const uint8 = new Uint8Array(arrayBuffer);
 
@@ -25,7 +36,18 @@ export async function fetchSTT(audio: Blob, apiKey: string): Promise<string> {
   if (response.success && response.transcription) {
     return response.transcription.trim();
   }
-  throw new Error(response.error || "Transcription failed");
+
+  const errorMsg = response.error || "Transcription failed";
+  if (errorMsg.includes("Unauthorized")) {
+    throw new Error("Invalid API key — check your OpenAI key in settings");
+  }
+  if (errorMsg.includes("Rate limited")) {
+    throw new Error("Rate limited — too many requests, please wait a moment");
+  }
+  if (errorMsg.includes("500") || errorMsg.includes("502") || errorMsg.includes("503")) {
+    throw new Error("OpenAI service error — try again in a few seconds");
+  }
+  throw new Error(errorMsg);
 }
 
 /**

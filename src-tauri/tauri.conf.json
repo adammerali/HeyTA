@@ -28,6 +28,18 @@
         "focus": false,
         "center": true,
         "contentProtected": false
+      },
+      {
+        "label": "dashboard",
+        "title": "Hey TA",
+        "url": "/#/dashboard",
+        "width": 960,
+        "height": 700,
+        "minWidth": 700,
+        "minHeight": 500,
+        "decorations": true,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {

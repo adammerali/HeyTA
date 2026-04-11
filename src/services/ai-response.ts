@@ -1,6 +1,69 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+/**
+ * Promise-based async queue that replaces the polling sleep pattern.
+ * Chunks pushed by event listeners are yielded to consumers immediately
+ * via a pending promise resolver, eliminating busy-wait latency.
+ */
+function createAsyncQueue<T>(): {
+  push: (item: T) => void;
+  complete: () => void;
+  error: (err: Error) => void;
+  iterate: () => AsyncGenerator<T>;
+} {
+  const buffer: T[] = [];
+  let done = false;
+  let rejection: Error | null = null;
+  let waiting: { resolve: () => void; reject: (e: Error) => void } | null = null;
+
+  function push(item: T) {
+    buffer.push(item);
+    waiting?.resolve();
+    waiting = null;
+  }
+
+  function complete() {
+    done = true;
+    waiting?.resolve();
+    waiting = null;
+  }
+
+  function error(err: Error) {
+    rejection = err;
+    done = true;
+    waiting?.reject(err);
+    waiting = null;
+  }
+
+  async function* iterate(): AsyncGenerator<T> {
+    while (true) {
+      while (buffer.length > 0) {
+        yield buffer.shift()!;
+      }
+
+      if (done) break;
+
+      await new Promise<void>((resolve, reject) => {
+        if (buffer.length > 0 || done) {
+          resolve();
+        } else {
+          waiting = { resolve, reject };
+        }
+      });
+
+      if (rejection) throw rejection;
+    }
+  }
+
+  return { push, complete, error, iterate };
+}
+
+/**
+ * Stream AI response chunks from GPT-4o via Tauri SSE events.
+ * Uses a zero-latency async queue instead of polling — chunks are
+ * yielded to the consumer as soon as the Tauri event fires.
+ */
 export async function* streamAIResponse(params: {
   apiKey: string;
   messages: object[];
@@ -11,51 +74,35 @@ export async function* streamAIResponse(params: {
 
   if (signal?.aborted) return;
 
-  const chunks: string[] = [];
-  let complete = false;
-  let error: string | null = null;
-  let yieldIndex = 0;
+  const queue = createAsyncQueue<string>();
 
   const unlisten = await listen("chat_stream_chunk", (event) => {
-    chunks.push(event.payload as string);
+    queue.push(event.payload as string);
   });
   const unlistenComplete = await listen("chat_stream_complete", () => {
-    complete = true;
+    queue.complete();
   });
 
-  // Fire invoke WITHOUT awaiting — it runs in background while we yield chunks
   const invokePromise = invoke("chat_stream_response", {
     apiKey,
     messagesJson: JSON.stringify(messages),
     model,
   }).catch((err) => {
-    error = String(err);
-    complete = true;
+    queue.error(new Error(String(err)));
   });
 
+  const abortHandler = () => queue.complete();
+  signal?.addEventListener("abort", abortHandler);
+
   try {
-    while (!complete && !signal?.aborted) {
-      await new Promise((r) => setTimeout(r, 80));
-
-      while (yieldIndex < chunks.length) {
-        yield chunks[yieldIndex];
-        yieldIndex++;
-      }
+    for await (const chunk of queue.iterate()) {
+      if (signal?.aborted) break;
+      yield chunk;
     }
 
-    // Drain any remaining chunks
-    while (yieldIndex < chunks.length) {
-      yield chunks[yieldIndex];
-      yieldIndex++;
-    }
-
-    // Await the invoke to ensure it completes (and catches errors)
     await invokePromise;
-
-    if (error && !signal?.aborted) {
-      throw new Error(error);
-    }
   } finally {
+    signal?.removeEventListener("abort", abortHandler);
     unlisten();
     unlistenComplete();
   }

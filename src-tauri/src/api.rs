@@ -1,9 +1,25 @@
+//! OpenAI API integration — all external HTTP requests route through Rust
+//! to bypass CORS restrictions and keep API keys out of the browser network inspector.
+
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::StreamExt;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
-use std::process::Command as StdCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::error::{classify_api_error, AppError};
+
+/// Holds a cancellation flag for the active SSE stream, allowing the
+/// frontend to abort an in-flight GPT-4o request from the Rust side.
+pub struct StreamCancelFlag(pub Arc<AtomicBool>);
+
+impl Default for StreamCancelFlag {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AudioResponse {
@@ -12,12 +28,17 @@ pub struct AudioResponse {
     pub error: Option<String>,
 }
 
+/// Transcribe an audio blob via the OpenAI Whisper API.
+///
+/// Accepts base64-encoded audio (with or without a data-URI prefix),
+/// converts to bytes, and sends as multipart form to `/v1/audio/transcriptions`.
+/// Returns a structured response with the transcript or an error message.
 #[tauri::command]
 pub async fn transcribe_audio(
     audio_base64: String,
     api_key: String,
     mime_type: Option<String>,
-) -> Result<AudioResponse, String> {
+) -> Result<AudioResponse, AppError> {
     let trimmed = audio_base64.trim();
     let b64_data = if let Some(idx) = trimmed.find(',') {
         &trimmed[idx + 1..]
@@ -25,9 +46,7 @@ pub async fn transcribe_audio(
         trimmed
     };
 
-    let audio_bytes = general_purpose::STANDARD
-        .decode(b64_data)
-        .map_err(|e| format!("Failed to decode audio: {}", e))?;
+    let audio_bytes = general_purpose::STANDARD.decode(b64_data)?;
 
     let mime = mime_type.unwrap_or_else(|| "audio/mp4".to_string());
     let ext = if mime.contains("webm") { "webm" }
@@ -38,7 +57,7 @@ pub async fn transcribe_audio(
     let audio_part = Part::bytes(audio_bytes)
         .file_name(format!("audio.{}", ext))
         .mime_str(&mime)
-        .map_err(|e| format!("Failed to prepare audio: {}", e))?;
+        .map_err(|e| AppError::Encoding(format!("MIME: {}", e)))?;
 
     let form = Form::new()
         .part("file", audio_part)
@@ -51,23 +70,19 @@ pub async fn transcribe_audio(
         .bearer_auth(&api_key)
         .multipart(form)
         .send()
-        .await
-        .map_err(|e| format!("Transcription request failed: {}", e))?;
+        .await?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let err = response.text().await.unwrap_or_default();
         return Ok(AudioResponse {
             success: false,
             transcription: None,
-            error: Some(format!("Whisper API error ({}): {}", status, err)),
+            error: Some(classify_api_error(status, err).to_string()),
         });
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let body: serde_json::Value = response.json().await?;
 
     let text = body
         .get("text")
@@ -82,15 +97,25 @@ pub async fn transcribe_audio(
     })
 }
 
+/// Stream a chat completion from GPT-4o via Server-Sent Events (SSE).
+///
+/// The function opens a streaming HTTP connection to OpenAI, parses each
+/// SSE `data:` line, and emits `chat_stream_chunk` Tauri events as content
+/// tokens arrive. A final `chat_stream_complete` event carries the full text.
+///
+/// The SSE loop checks a shared `StreamCancelFlag` on every chunk so the
+/// frontend can abort mid-stream via the `cancel_stream` command.
 #[tauri::command]
 pub async fn chat_stream_response(
     app: AppHandle,
     api_key: String,
     messages_json: String,
     model: String,
-) -> Result<String, String> {
-    let messages: serde_json::Value = serde_json::from_str(&messages_json)
-        .map_err(|e| format!("Invalid messages JSON: {}", e))?;
+) -> Result<String, AppError> {
+    let messages: serde_json::Value = serde_json::from_str(&messages_json)?;
+
+    let cancel = app.state::<StreamCancelFlag>();
+    cancel.0.store(false, Ordering::SeqCst);
 
     let request_body = serde_json::json!({
         "model": model,
@@ -106,13 +131,12 @@ pub async fn chat_stream_response(
         .bearer_auth(&api_key)
         .json(&request_body)
         .send()
-        .await
-        .map_err(|e| format!("API request failed: {}", e))?;
+        .await?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let err = response.text().await.unwrap_or_default();
-        return Err(format!("OpenAI API error ({}): {}", status, err));
+        return Err(classify_api_error(status, err));
     }
 
     let mut stream = response.bytes_stream();
@@ -120,59 +144,68 @@ pub async fn chat_stream_response(
     let mut buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
-        match chunk {
-            Ok(bytes) => {
-                let chunk_str = String::from_utf8_lossy(&bytes);
-                buffer.push_str(&chunk_str);
+        if cancel.0.load(Ordering::SeqCst) {
+            let _ = app.emit("chat_stream_complete", &full_response);
+            return Err(AppError::Cancelled);
+        }
 
-                let lines: Vec<&str> = buffer.split('\n').collect();
-                let incomplete = lines.last().unwrap_or(&"").to_string();
+        let bytes = chunk?;
+        let chunk_str = String::from_utf8_lossy(&bytes);
+        buffer.push_str(&chunk_str);
 
-                for line in &lines[..lines.len() - 1] {
-                    let trimmed = line.trim();
-                    if let Some(json_str) = trimmed.strip_prefix("data: ") {
-                        if json_str == "[DONE]" {
-                            break;
-                        }
-                        if !json_str.is_empty() {
-                            if let Ok(parsed) =
-                                serde_json::from_str::<serde_json::Value>(json_str)
-                            {
-                                if let Some(content) = parsed
-                                    .get("choices")
-                                    .and_then(|c| c.as_array())
-                                    .and_then(|arr| arr.first())
-                                    .and_then(|choice| choice.get("delta"))
-                                    .and_then(|delta| delta.get("content"))
-                                    .and_then(|c| c.as_str())
-                                {
-                                    full_response.push_str(content);
-                                    let _ = app.emit("chat_stream_chunk", content);
-                                }
-                            }
-                        }
-                    }
-                }
-                buffer = incomplete;
-            }
-            Err(e) => {
-                return Err(format!("Stream error: {}", e));
+        let lines: Vec<&str> = buffer.split('\n').collect();
+        let incomplete = lines.last().unwrap_or(&"").to_string();
+
+        for line in &lines[..lines.len() - 1] {
+            if let Some(content) = parse_sse_content(line) {
+                full_response.push_str(&content);
+                let _ = app.emit("chat_stream_chunk", &content);
             }
         }
+        buffer = incomplete;
     }
 
     let _ = app.emit("chat_stream_complete", &full_response);
     Ok(full_response)
 }
 
+/// Parse a single SSE line and extract the content delta if present.
+/// Returns `None` for non-data lines, empty data, and the `[DONE]` sentinel.
+fn parse_sse_content(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let json_str = trimmed.strip_prefix("data: ")?;
+
+    if json_str == "[DONE]" || json_str.is_empty() {
+        return None;
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    parsed
+        .get("choices")?
+        .as_array()?
+        .first()?
+        .get("delta")?
+        .get("content")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Cancel an in-flight streaming response by setting the atomic cancel flag.
+/// The SSE loop in `chat_stream_response` checks this flag on every chunk.
+#[tauri::command]
+pub fn cancel_stream(app: AppHandle) {
+    let cancel = app.state::<StreamCancelFlag>();
+    cancel.0.store(true, Ordering::SeqCst);
+}
+
+/// Send a non-streaming chat completion request (used for recap generation).
 #[tauri::command]
 pub async fn send_message_simple(
     api_key: String,
     messages_json: String,
     model: String,
-) -> Result<String, String> {
-    let messages: serde_json::Value = serde_json::from_str(&messages_json)
-        .map_err(|e| format!("Invalid messages JSON: {}", e))?;
+) -> Result<String, AppError> {
+    let messages: serde_json::Value = serde_json::from_str(&messages_json)?;
 
     let request_body = serde_json::json!({
         "model": model,
@@ -187,19 +220,15 @@ pub async fn send_message_simple(
         .bearer_auth(&api_key)
         .json(&request_body)
         .send()
-        .await
-        .map_err(|e| format!("API request failed: {}", e))?;
+        .await?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let err = response.text().await.unwrap_or_default();
-        return Err(format!("OpenAI API error ({}): {}", status, err));
+        return Err(classify_api_error(status, err));
     }
 
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let body: serde_json::Value = response.json().await?;
 
     let content = body
         .get("choices")
@@ -214,12 +243,16 @@ pub async fn send_message_simple(
     Ok(content)
 }
 
+/// Fetch synthesized speech audio from the OpenAI TTS API.
+///
+/// Returns the audio as a base64-encoded MP3 string for playback
+/// via the Web Audio API in the frontend.
 #[tauri::command]
 pub async fn fetch_tts_audio(
     text: String,
     api_key: String,
     voice: Option<String>,
-) -> Result<String, String> {
+) -> Result<String, AppError> {
     let voice = voice.unwrap_or_else(|| "shimmer".to_string());
 
     let request_body = serde_json::json!({
@@ -236,46 +269,81 @@ pub async fn fetch_tts_audio(
         .bearer_auth(&api_key)
         .json(&request_body)
         .send()
-        .await
-        .map_err(|e| format!("TTS request failed: {}", e))?;
+        .await?;
 
     if !response.status().is_success() {
-        let status = response.status();
+        let status = response.status().as_u16();
         let err = response.text().await.unwrap_or_default();
-        return Err(format!("TTS API error ({}): {}", status, err));
+        return Err(classify_api_error(status, err));
     }
 
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read TTS audio: {}", e))?;
+    let bytes = response.bytes().await?;
+    let b64 = general_purpose::STANDARD.encode(&bytes);
+    Ok(b64)
+}
+
+/// Take an interactive screenshot using the macOS `screencapture -i` command.
+/// Returns the captured image as a base64-encoded PNG string.
+#[tauri::command]
+pub async fn native_screenshot() -> Result<String, AppError> {
+    let tmp = std::env::temp_dir().join(format!("heyta_screenshot_{}.png", uuid::Uuid::new_v4()));
+    let tmp_str = tmp.to_string_lossy().to_string();
+
+    let status = std::process::Command::new("screencapture")
+        .args(["-i", &tmp_str])
+        .status()?;
+
+    if !status.success() || !tmp.exists() {
+        return Err(AppError::Cancelled);
+    }
+
+    let bytes = std::fs::read(&tmp)?;
+    let _ = std::fs::remove_file(&tmp);
 
     let b64 = general_purpose::STANDARD.encode(&bytes);
     Ok(b64)
 }
 
-#[tauri::command]
-pub async fn native_screenshot() -> Result<String, String> {
-    let tmp = std::env::temp_dir().join(format!("heyta_screenshot_{}.png", uuid::Uuid::new_v4()));
-    let tmp_str = tmp.to_string_lossy().to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let status = StdCommand::new("screencapture")
-        .args(["-i", &tmp_str])
-        .status()
-        .map_err(|e| format!("Failed to run screencapture: {}", e))?;
-
-    if !status.success() {
-        return Err("Screenshot cancelled".to_string());
+    #[test]
+    fn parse_sse_content_extracts_delta() {
+        let line = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
+        assert_eq!(parse_sse_content(line), Some("Hello".to_string()));
     }
 
-    if !tmp.exists() {
-        return Err("Screenshot cancelled".to_string());
+    #[test]
+    fn parse_sse_content_returns_none_for_done() {
+        assert_eq!(parse_sse_content("data: [DONE]"), None);
     }
 
-    let bytes = std::fs::read(&tmp)
-        .map_err(|e| format!("Failed to read screenshot: {}", e))?;
-    let _ = std::fs::remove_file(&tmp);
+    #[test]
+    fn parse_sse_content_returns_none_for_empty_data() {
+        assert_eq!(parse_sse_content("data: "), None);
+    }
 
-    let b64 = general_purpose::STANDARD.encode(&bytes);
-    Ok(b64)
+    #[test]
+    fn parse_sse_content_returns_none_for_non_data_line() {
+        assert_eq!(parse_sse_content(": keep-alive"), None);
+        assert_eq!(parse_sse_content(""), None);
+    }
+
+    #[test]
+    fn parse_sse_content_handles_role_delta() {
+        let line = r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#;
+        assert_eq!(parse_sse_content(line), None);
+    }
+
+    #[test]
+    fn parse_sse_content_handles_malformed_json() {
+        assert_eq!(parse_sse_content("data: {invalid json}"), None);
+    }
+
+    #[test]
+    fn parse_sse_content_handles_whitespace() {
+        let line = r#"  data: {"choices":[{"delta":{"content":"world"}}]}  "#;
+        assert_eq!(parse_sse_content(line), Some("world".to_string()));
+    }
 }
