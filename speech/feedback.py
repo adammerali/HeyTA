@@ -1,44 +1,61 @@
 import os
+import re
 import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
-SYSTEM_PROMPT = """You are TA, an intelligent teaching assistant helping students understand course material in real time.
-
-When a student asks for help, you must:
-1. Identify exactly what they are struggling with or what they got wrong
-2. Explain the mistake or gap in understanding clearly but without being condescending
-3. Walk them toward the correct approach — guide, do not just give the answer
-4. Be warm, patient, and encouraging, the way a great human TA would be
-
-You will receive the student's spoken question. You may also receive notes or work extracted from their whiteboard — if so, use both together to give precise, targeted feedback.
-
-Keep your response conversational and concise. This is a live, real-time interaction."""
+SYSTEM_PROMPT = """You are TA, a real-time teaching assistant. Answer in 1-2 sentences only. Be direct — guide toward the answer, don't give it. If you can see the student's work, reference it specifically."""
 
 
-def get_feedback(transcript: str, whiteboard_content: str | None = None) -> str:
+def get_feedback(
+    transcript: str,
+    whiteboard_content: str | None = None,
+    image_b64: str | None = None,
+):
     """
-    Call the LLM to get teaching feedback for a student's question.
-
-    Args:
-        transcript:         What the student said, captured from speech recognition.
-        whiteboard_content: (Optional) Text or description extracted from the student's
-                            whiteboard by the OpenCV component. Pass this in when available
-                            to give the model full context of the student's written work.
-
-    Returns:
-        A feedback string from the model, ready to display or speak back to the student.
+    Stream the LLM response and yield complete sentences as they arrive.
+    This allows TTS to start playing the first sentence before Claude finishes.
     """
-    user_message = f"Student's question: {transcript}"
+    content = []
 
+    if image_b64:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": image_b64,
+            },
+        })
+
+    text_body = f"Student's question: {transcript}"
     if whiteboard_content:
-        user_message += f"\n\nWhiteboard / written work:\n{whiteboard_content}"
+        text_body += f"\n\nWhiteboard / written work:\n{whiteboard_content}"
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
+    content.append({"type": "text", "text": text_body})
+
+    buffer = ""
+    with client.messages.stream(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=150,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-    )
+        messages=[{"role": "user", "content": content}],
+    ) as stream:
+        for token in stream.text_stream:
+            buffer += token
+            # Yield complete sentences as they form
+            while True:
+                match = re.search(r"[.!?]\s", buffer)
+                if not match:
+                    break
+                sentence = buffer[:match.end()].strip()
+                buffer = buffer[match.end():]
+                if sentence:
+                    yield sentence
 
-    return response.content[0].text
+    # Yield any remaining text after stream ends
+    if buffer.strip():
+        yield buffer.strip()

@@ -2,3 +2,5 @@ speechrecognition
 pyaudio
 anthropic
 python-dotenv
+openai
+opencv-python

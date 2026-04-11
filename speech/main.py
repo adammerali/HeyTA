@@ -2,29 +2,24 @@ import os
 from dotenv import load_dotenv
 from listener import TAListener
 from feedback import get_feedback
+from tts import speak
 
 load_dotenv()
 
 
-def handle_question(transcript: str):
-    """
-    Called by the listener whenever a student's full question has been captured.
-
-    To integrate the OpenCV component, pass whiteboard_content into get_feedback().
-    Example:
-        whiteboard_text = opencv_module.get_latest_whiteboard_text()
-        feedback = get_feedback(transcript, whiteboard_content=whiteboard_text)
-    """
+def handle_question(transcript: str, image_b64: str | None = None):
     print("Fetching feedback from TA...\n")
     print("-" * 60)
+    print("TA:\n")
 
-    feedback = get_feedback(
+    for sentence in get_feedback(
         transcript=transcript,
         whiteboard_content=None,  # TODO: OpenCV team — plug your output in here
-    )
+        image_b64=image_b64,
+    ):
+        print(sentence)
+        speak(sentence)
 
-    print("TA:\n")
-    print(feedback)
     print("-" * 60)
     print()
 
