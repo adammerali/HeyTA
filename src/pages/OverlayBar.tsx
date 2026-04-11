@@ -49,14 +49,14 @@ const OverlayBar = () => {
   const capturingRef = useRef(false);
   const capturingPartsRef = useRef<string[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const vadEnabledRef = useRef(false);
   const supportedMimeRef = useRef<string>("");
+  const persistentStreamRef = useRef<MediaStream | null>(null);
+  const recordingLoopRef = useRef(false);
 
   useEffect(() => { vadEnabledRef.current = vadEnabled; }, [vadEnabled]);
 
-  // Detect supported mimeType once
   useEffect(() => {
     supportedMimeRef.current = getSupportedMimeType();
     console.log("[HeyTA] MediaRecorder mimeType:", supportedMimeRef.current || "NONE SUPPORTED");
@@ -78,32 +78,36 @@ const OverlayBar = () => {
 
   // ---- Voice / STT ----
 
+  const pendingSTTRef = useRef(0);
+
   const handleAudioBlob = useCallback(
     async (audioBlob: Blob) => {
       if (!apiKey) return;
-      setLocalStatus("transcribing");
+
+      pendingSTTRef.current++;
 
       try {
         const text = await fetchSTT(audioBlob, apiKey);
         if (!text || WHISPER_ARTIFACTS.has(text.trim().toLowerCase())) {
-          setLocalStatus("listening");
           return;
         }
+
+        console.log("[HeyTA] Transcript:", text, "| capturing:", capturingRef.current);
 
         if (capturingRef.current) {
           if (containsStopPhrase(text, STOP_PHRASES)) {
             capturingRef.current = false;
             const fullQ = capturingPartsRef.current.join(" ").trim();
             capturingPartsRef.current = [];
+            console.log("[HeyTA] Stop phrase detected, full question:", fullQ);
             if (fullQ) askQuestion(fullQ);
-            setLocalStatus("listening");
           } else {
             capturingPartsRef.current.push(text);
-            setLocalStatus("listening");
           }
         } else {
           const { detected, question } = detectWakePhrase(text, WAKE_PHRASES);
           if (detected) {
+            console.log("[HeyTA] Wake phrase detected, trailing question:", question);
             if (question) {
               askQuestion(question);
             } else {
@@ -111,22 +115,73 @@ const OverlayBar = () => {
               capturingPartsRef.current = [];
             }
           }
-          setLocalStatus("listening");
         }
       } catch (err) {
         console.error("STT error:", err);
-        setLocalStatus("listening");
+      } finally {
+        pendingSTTRef.current--;
       }
     },
     [apiKey, askQuestion],
   );
 
-  const startRecording = useCallback(async () => {
-    if (!vadEnabledRef.current) return;
+  // Start a single recording chunk on the persistent stream
+  const recordChunk = useCallback(() => {
+    const stream = persistentStreamRef.current;
+    const mime = supportedMimeRef.current;
+    if (!stream || !mime || !vadEnabledRef.current) {
+      recordingLoopRef.current = false;
+      return;
+    }
 
+    const chunks: Blob[] = [];
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: mime });
+    } catch {
+      recordingLoopRef.current = false;
+      return;
+    }
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      mediaRecorderRef.current = null;
+      const blob = new Blob(chunks, { type: mime });
+
+      // Start next chunk IMMEDIATELY — don't wait for transcription
+      if (vadEnabledRef.current) {
+        recordChunk();
+      } else {
+        recordingLoopRef.current = false;
+      }
+
+      // Transcribe in parallel (fire-and-forget)
+      if (blob.size > 500) {
+        handleAudioBlob(blob);
+      }
+    };
+
+    recorder.onerror = () => {
+      mediaRecorderRef.current = null;
+      if (vadEnabledRef.current) setTimeout(recordChunk, 500);
+      else recordingLoopRef.current = false;
+    };
+
+    mediaRecorderRef.current = recorder;
+    recorder.start();
+
+    setTimeout(() => {
+      if (recorder.state === "recording") recorder.stop();
+    }, 4000);
+  }, [handleAudioBlob]);
+
+  // Acquire persistent mic stream and start recording loop
+  const startMic = useCallback(async () => {
     const mime = supportedMimeRef.current;
     if (!mime) {
-      console.error("No supported MediaRecorder mimeType");
       setStatusError("Browser does not support audio recording");
       setLocalStatus("error");
       setVadEnabled(false);
@@ -135,44 +190,33 @@ const OverlayBar = () => {
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      persistentStreamRef.current = stream;
       setMicStream(stream);
-
-      const recorder = new MediaRecorder(stream, { mimeType: mime });
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: mime });
-        stream.getTracks().forEach((t) => t.stop());
-        if (blob.size > 1000) {
-          handleAudioBlob(blob);
-        } else if (vadEnabledRef.current) {
-          setTimeout(startRecording, 150);
-        }
-      };
-
-      recorder.onerror = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        if (vadEnabledRef.current) setTimeout(startRecording, 500);
-      };
-
-      recorder.start();
-      mediaRecorderRef.current = recorder;
-
-      setTimeout(() => {
-        if (recorder.state === "recording") recorder.stop();
-      }, 4000);
+      setLocalStatus("listening");
+      recordingLoopRef.current = true;
+      recordChunk();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Mic access denied";
-      console.error("Mic access error:", msg);
       setStatusError(msg);
       setLocalStatus("error");
       setVadEnabled(false);
     }
-  }, [handleAudioBlob]);
+  }, [recordChunk]);
+
+  const stopMic = useCallback(() => {
+    recordingLoopRef.current = false;
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    mediaRecorderRef.current = null;
+    if (persistentStreamRef.current) {
+      persistentStreamRef.current.getTracks().forEach((t) => t.stop());
+      persistentStreamRef.current = null;
+    }
+    setMicStream(null);
+    capturingRef.current = false;
+    capturingPartsRef.current = [];
+  }, []);
 
   const toggleMic = useCallback(() => {
     if (!apiKey) {
@@ -182,30 +226,16 @@ const OverlayBar = () => {
     setStatusError(null);
     if (vadEnabled) {
       setVadEnabled(false);
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
-      mediaRecorderRef.current = null;
-      setMicStream(null);
+      stopMic();
       setLocalStatus(camera.isActive ? "camera_active" : "idle");
-      capturingRef.current = false;
     } else {
       setVadEnabled(true);
-      setLocalStatus("listening");
     }
-  }, [vadEnabled, camera.isActive, apiKey]);
+  }, [vadEnabled, camera.isActive, apiKey, stopMic]);
 
   useEffect(() => {
-    if (vadEnabled) startRecording();
-  }, [vadEnabled, startRecording]);
-
-  // Restart recording loop after handleAudioBlob completes
-  useEffect(() => {
-    if (vadEnabled && localStatus === "listening" && !mediaRecorderRef.current) {
-      const t = setTimeout(startRecording, 150);
-      return () => clearTimeout(t);
-    }
-  }, [vadEnabled, localStatus, startRecording]);
+    if (vadEnabled) startMic();
+  }, [vadEnabled]);
 
   // ---- Camera ----
 
@@ -215,7 +245,6 @@ const OverlayBar = () => {
       camera.stop();
       setLocalStatus(vadEnabled ? "listening" : "idle");
     } else {
-      setLocalStatus("idle");
       const ok = await camera.start();
       if (ok) {
         setLocalStatus(vadEnabled ? "listening" : "camera_active");
@@ -226,7 +255,7 @@ const OverlayBar = () => {
     }
   }, [camera, vadEnabled]);
 
-  // ---- Screenshot (native macOS) ----
+  // ---- Screenshot ----
 
   const handleScreenshot = useCallback(async () => {
     setIsScreenshotting(true);
@@ -238,8 +267,6 @@ const OverlayBar = () => {
     }
     setIsScreenshotting(false);
   }, [setProblemScreenshot]);
-
-  // ---- API key inline save ----
 
   const handleSaveApiKey = () => {
     if (apiKeyDraft.trim()) {
@@ -269,7 +296,7 @@ const OverlayBar = () => {
     if (statusError) return statusError;
     switch (displayStatus) {
       case "idle":
-        if (!apiKey) return "Click 🔑 to enter API key";
+        if (!apiKey) return "Click key icon to enter API key";
         return camera.isActive ? "Ready — camera on" : "Ready";
       case "camera_active":
         return "Camera on — ready";
@@ -277,10 +304,10 @@ const OverlayBar = () => {
         return capturingRef.current
           ? 'Listening... say "stop" when done'
           : 'Say "Hey TA" + your question';
-      case "transcribing": return "Transcribing...";
+      case "transcribing": return "Processing speech...";
       case "thinking": return "Thinking...";
       case "speaking": return "Speaking...";
-      case "error": return "Error — see hover for details";
+      case "error": return statusError || "Error";
       default: return "Ready";
     }
   })();
@@ -374,7 +401,7 @@ const OverlayBar = () => {
             <div className="text-[10px] text-amber-400 mb-1 font-medium flex items-center gap-1">
               <KeyRound className="w-3 h-3" /> NEEDS API KEY
             </div>
-            <p className="text-[10px] text-zinc-500">Click the 🔑 button first to enter your OpenAI key.</p>
+            <p className="text-[10px] text-zinc-500">Click the key button to enter your OpenAI key.</p>
           </div>
         );
       }
@@ -410,7 +437,7 @@ const OverlayBar = () => {
               </button>
             </div>
             <img src={`data:image/png;base64,${problemScreenshot}`} className="w-full rounded-lg border border-white/10" />
-            <p className="text-[10px] text-zinc-500 mt-1.5">Sent as context with next question. Click ✕ to clear.</p>
+            <p className="text-[10px] text-zinc-500 mt-1.5">Sent as context with next question.</p>
           </div>
         );
       }
@@ -445,7 +472,6 @@ const OverlayBar = () => {
   return (
     <div className="w-screen h-screen flex flex-col overflow-visible items-center">
       <Card className="w-full flex flex-row items-center gap-1.5 p-2 relative shrink-0">
-        {/* Drag */}
         <Button
           variant="ghost" size="icon"
           className="-ml-[2px] w-fit cursor-grab active:cursor-grabbing"
@@ -454,12 +480,10 @@ const OverlayBar = () => {
           <GripVerticalIcon className="h-4 w-4 pointer-events-none" />
         </Button>
 
-        {/* Brand */}
         <div className="w-6 h-6 rounded-md flex items-center justify-center text-white font-bold shrink-0 text-[9px] tracking-wide" style={{ background: "#10a37f" }}>TA</div>
 
         <div className="w-px h-4 bg-border shrink-0" />
 
-        {/* Status */}
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
           <div className="relative w-2 h-2 shrink-0">
             {isAnimating && <span className="absolute inset-0 rounded-full animate-ping opacity-75" style={{ background: dotColor }} />}
@@ -470,7 +494,7 @@ const OverlayBar = () => {
 
         <div className="w-px h-4 bg-border shrink-0" />
 
-        {/* Camera */}
+        {/* Camera — icon shows CURRENT state */}
         <Button
           ref={cameraRef} variant="ghost" size="icon"
           className={cn("cursor-pointer h-7 w-7 relative", camera.isActive && "bg-emerald-500/20 text-emerald-400")}
@@ -478,11 +502,11 @@ const OverlayBar = () => {
           onMouseEnter={() => handleHoverEnter("camera")}
           onMouseLeave={handleHoverLeave}
         >
-          {camera.isActive ? <CameraOff className="h-3.5 w-3.5" /> : <Camera className="h-3.5 w-3.5" />}
+          {camera.isActive ? <Camera className="h-3.5 w-3.5" /> : <CameraOff className="h-3.5 w-3.5 opacity-50" />}
           {camera.isActive && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />}
         </Button>
 
-        {/* Mic */}
+        {/* Mic — icon shows CURRENT state */}
         <Button
           ref={micRef} variant="ghost" size="icon"
           className={cn(
@@ -497,9 +521,9 @@ const OverlayBar = () => {
           {displayStatus === "transcribing" ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : vadEnabled ? (
-            <MicOff className="h-3.5 w-3.5" />
-          ) : (
             <Mic className="h-3.5 w-3.5" />
+          ) : (
+            <MicOff className="h-3.5 w-3.5 opacity-50" />
           )}
           {vadEnabled && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
         </Button>
@@ -519,13 +543,9 @@ const OverlayBar = () => {
 
         <div className="w-px h-4 bg-border shrink-0" />
 
-        {/* API Key */}
         <Button
           ref={apikeyRef} variant="ghost" size="icon"
-          className={cn(
-            "cursor-pointer h-7 w-7 relative",
-            apiKey ? "text-emerald-400" : "text-amber-400",
-          )}
+          className={cn("cursor-pointer h-7 w-7 relative", apiKey ? "text-emerald-400" : "text-amber-400")}
           onClick={() => setHoverTarget(hoverTarget === "apikey" ? null : "apikey")}
           onMouseEnter={() => handleHoverEnter("apikey")}
           onMouseLeave={handleHoverLeave}
@@ -534,7 +554,6 @@ const OverlayBar = () => {
           {apiKey && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />}
         </Button>
 
-        {/* Open dashboard panel */}
         <Button variant="ghost" size="icon" className="cursor-pointer h-7 w-7" onClick={openPanel}>
           <PanelRightOpen className="h-3.5 w-3.5" />
         </Button>
@@ -547,7 +566,6 @@ const OverlayBar = () => {
         />
       </Card>
 
-      {/* Hover popover */}
       {hoverTarget && popoverContent && (
         <div
           className="absolute z-50 mt-1"
@@ -561,7 +579,6 @@ const OverlayBar = () => {
         </div>
       )}
 
-      {/* Hidden video for frame capture when popover not showing camera */}
       {camera.isActive && hoverTarget !== "camera" && (
         <video ref={camera.setVideoRef} className="hidden" autoPlay playsInline muted />
       )}

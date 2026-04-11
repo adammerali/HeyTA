@@ -1,8 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-const CHUNK_POLL_MS = 50;
-
 export async function* streamAIResponse(params: {
   apiKey: string;
   messages: object[];
@@ -15,6 +13,8 @@ export async function* streamAIResponse(params: {
 
   const chunks: string[] = [];
   let complete = false;
+  let error: string | null = null;
+  let yieldIndex = 0;
 
   const unlisten = await listen("chat_stream_chunk", (event) => {
     chunks.push(event.payload as string);
@@ -23,31 +23,37 @@ export async function* streamAIResponse(params: {
     complete = true;
   });
 
+  // Fire invoke WITHOUT awaiting — it runs in background while we yield chunks
+  const invokePromise = invoke("chat_stream_response", {
+    apiKey,
+    messagesJson: JSON.stringify(messages),
+    model,
+  }).catch((err) => {
+    error = String(err);
+    complete = true;
+  });
+
   try {
-    if (signal?.aborted) return;
+    while (!complete && !signal?.aborted) {
+      await new Promise((r) => setTimeout(r, 80));
 
-    await invoke("chat_stream_response", {
-      apiKey,
-      messagesJson: JSON.stringify(messages),
-      model,
-    });
-
-    let lastIndex = 0;
-    while (!complete) {
-      if (signal?.aborted) return;
-      await new Promise((r) => setTimeout(r, CHUNK_POLL_MS));
-      if (signal?.aborted) return;
-
-      for (let i = lastIndex; i < chunks.length; i++) {
-        yield chunks[i];
+      while (yieldIndex < chunks.length) {
+        yield chunks[yieldIndex];
+        yieldIndex++;
       }
-      lastIndex = chunks.length;
     }
 
-    if (signal?.aborted) return;
+    // Drain any remaining chunks
+    while (yieldIndex < chunks.length) {
+      yield chunks[yieldIndex];
+      yieldIndex++;
+    }
 
-    for (let i = lastIndex; i < chunks.length; i++) {
-      yield chunks[i];
+    // Await the invoke to ensure it completes (and catches errors)
+    await invokePromise;
+
+    if (error && !signal?.aborted) {
+      throw new Error(error);
     }
   } finally {
     unlisten();

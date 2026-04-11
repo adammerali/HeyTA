@@ -19,7 +19,11 @@ export function buildMessages(request: TutoringRequest): object[] {
   const recentHistory = request.conversationHistory.slice(-3);
   for (const entry of recentHistory) {
     messages.push({ role: "user", content: entry.question });
-    messages.push({ role: "assistant", content: entry.writtenExplanation });
+    const assistantJSON = JSON.stringify({
+      spoken_blurb: entry.spokenBlurb,
+      written_explanation: entry.writtenExplanation,
+    });
+    messages.push({ role: "assistant", content: assistantJSON });
   }
 
   const userContent: object[] = [];
@@ -60,7 +64,7 @@ export function buildMessages(request: TutoringRequest): object[] {
 
   userContent.push({
     type: "text",
-    text: `Student's question: ${request.userQuestion}${modeHint}`,
+    text: `Student's question: ${request.userQuestion}${modeHint}\n\nRemember: respond with ONLY raw JSON, no markdown fences. {"spoken_blurb":"...","written_explanation":"..."}`,
   });
 
   messages.push({ role: "user", content: userContent });

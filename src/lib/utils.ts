@@ -5,43 +5,6 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function floatArrayToWav(
-  audioData: Float32Array,
-  sampleRate: number = 16000,
-): Blob {
-  const buffer = new ArrayBuffer(44 + audioData.length * 2);
-  const view = new DataView(buffer);
-
-  const writeString = (offset: number, s: string) => {
-    for (let i = 0; i < s.length; i++) {
-      view.setUint8(offset + i, s.charCodeAt(i));
-    }
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + audioData.length * 2, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeString(36, "data");
-  view.setUint32(40, audioData.length * 2, true);
-
-  let offset = 44;
-  for (let i = 0; i < audioData.length; i++) {
-    const sample = Math.max(-1, Math.min(1, audioData[i]));
-    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-    offset += 2;
-  }
-
-  return new Blob([buffer], { type: "audio/wav" });
-}
-
 export function generateId(prefix: string = ""): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).substring(2, 8);
@@ -67,31 +30,73 @@ export function containsStopPhrase(text: string, stopPhrases: string[]): boolean
   return stopPhrases.some((p) => lower.includes(p));
 }
 
+/**
+ * Robustly extract spoken_blurb and written_explanation from the model's response.
+ * Handles: raw JSON, JSON in markdown fences, partial JSON, and plain text fallback.
+ */
 export function parseTutoringResponse(fullText: string): {
   spoken_blurb: string;
   written_explanation: string;
 } {
-  // Try to extract JSON from response (model might wrap it in markdown code blocks)
-  let jsonStr = fullText.trim();
+  const text = fullText.trim();
 
-  const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (jsonMatch) {
-    jsonStr = jsonMatch[1].trim();
+  // Strategy 1: Try extracting JSON from markdown code fences
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) {
+    const result = tryParseJSON(fenceMatch[1].trim());
+    if (result) return result;
   }
 
+  // Strategy 2: Try parsing the whole text as JSON
+  const result = tryParseJSON(text);
+  if (result) return result;
+
+  // Strategy 3: Find the first { and last } and try parsing that substring
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const substr = text.slice(firstBrace, lastBrace + 1);
+    const result2 = tryParseJSON(substr);
+    if (result2) return result2;
+  }
+
+  // Strategy 4: Regex extraction of field values (handles malformed JSON)
+  const spokenMatch = text.match(/"spoken_blurb"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const writtenMatch = text.match(/"written_explanation"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (spokenMatch && writtenMatch) {
+    return {
+      spoken_blurb: unescapeJSON(spokenMatch[1]),
+      written_explanation: unescapeJSON(writtenMatch[1]),
+    };
+  }
+
+  // Strategy 5: Plain text fallback — use first 2 sentences as spoken
+  console.warn("[HeyTA] Could not parse JSON response, using plain text fallback");
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  return {
+    spoken_blurb: sentences.slice(0, 2).join(" ").trim(),
+    written_explanation: text,
+  };
+}
+
+function tryParseJSON(str: string): { spoken_blurb: string; written_explanation: string } | null {
   try {
-    const parsed = JSON.parse(jsonStr);
-    return {
-      spoken_blurb: parsed.spoken_blurb || parsed.spokenBlurb || "",
-      written_explanation:
-        parsed.written_explanation || parsed.writtenExplanation || parsed.written || "",
-    };
+    const parsed = JSON.parse(str);
+    const spoken = parsed.spoken_blurb || parsed.spokenBlurb || parsed.spoken || "";
+    const written = parsed.written_explanation || parsed.writtenExplanation || parsed.written || parsed.explanation || "";
+    if (spoken || written) {
+      return { spoken_blurb: spoken, written_explanation: written || spoken };
+    }
   } catch {
-    // Fallback: first 2 sentences as spoken, full text as written
-    const sentences = fullText.match(/[^.!?]+[.!?]+/g) || [fullText];
-    return {
-      spoken_blurb: sentences.slice(0, 2).join(" ").trim(),
-      written_explanation: fullText,
-    };
+    // Not valid JSON
   }
+  return null;
+}
+
+function unescapeJSON(str: string): string {
+  return str
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
 }
