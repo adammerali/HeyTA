@@ -7,17 +7,26 @@ load_dotenv()
 
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
-SYSTEM_PROMPT = """You are TA, a real-time teaching assistant. Answer in 1-2 sentences only. Be direct — guide toward the answer, don't give it. If you can see the student's work, reference it specifically."""
+SYSTEM_PROMPT = """You are TA, a real-time teaching assistant who can see the student's work through their camera.
+
+When an image is provided:
+- Look at it carefully first. Identify the exact problem being worked on.
+- Find the specific line, step, or expression where the mistake is. Name it explicitly.
+- Explain what is wrong there and why, in plain terms.
+
+Do not ask the student where they think they went wrong — you can see their work, so say what you see. Be specific and direct. A vague hint wastes their time. Keep your response to 2-3 sentences maximum."""
 
 
 def get_feedback(
     transcript: str,
+    history: list | None = None,
     whiteboard_content: str | None = None,
     image_b64: str | None = None,
 ):
     """
     Stream the LLM response and yield complete sentences as they arrive.
     This allows TTS to start playing the first sentence before Claude finishes.
+    history is a list of prior {"role": ..., "content": ...} dicts for the session.
     """
     content = []
 
@@ -37,12 +46,16 @@ def get_feedback(
 
     content.append({"type": "text", "text": text_body})
 
+    # Prior turns + current question
+    messages = list(history) if history else []
+    messages.append({"role": "user", "content": content})
+
     buffer = ""
     with client.messages.stream(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=150,
+        model="claude-sonnet-4-6",
+        max_tokens=300,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": content}],
+        messages=messages,
     ) as stream:
         for token in stream.text_stream:
             buffer += token

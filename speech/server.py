@@ -11,6 +11,7 @@ Events sent to clients:
 
 import asyncio
 import json
+import queue
 import threading
 
 try:
@@ -22,16 +23,46 @@ except ImportError:
 
 connected: set = set()
 _loop: asyncio.AbstractEventLoop | None = None
+_pending_status: dict | None = None
+_pending_user_message: dict | None = None
+_incoming: queue.Queue = queue.Queue()
 
 
 async def _handler(websocket):
     connected.add(websocket)
     print(f"[WS] Client connected ({len(connected)} total)")
+    # Replay current state to late-connecting clients (e.g. ChatWindow opening
+    # after the wake phrase was already detected)
+    if _pending_status is not None:
+        try:
+            await websocket.send(json.dumps(_pending_status))
+        except Exception:
+            pass
+    if _pending_user_message is not None:
+        try:
+            await websocket.send(json.dumps(_pending_user_message))
+        except Exception:
+            pass
     try:
-        await websocket.wait_closed()
+        async for raw in websocket:
+            try:
+                _incoming.put_nowait(json.loads(raw))
+            except Exception:
+                pass
     finally:
         connected.discard(websocket)
         print(f"[WS] Client disconnected ({len(connected)} remaining)")
+
+
+def drain_incoming() -> list[dict]:
+    """Return all messages sent by clients since the last call. Thread-safe."""
+    msgs = []
+    while True:
+        try:
+            msgs.append(_incoming.get_nowait())
+        except queue.Empty:
+            break
+    return msgs
 
 
 async def _serve():
@@ -54,6 +85,15 @@ def start():
 
 def broadcast(data: dict):
     """Thread-safe broadcast to all connected WebSocket clients."""
+    global _pending_status, _pending_user_message
+    # Always track the latest status so late-connecting clients get current state
+    if data.get("type") == "status":
+        _pending_status = data
+    # Buffer user_message so ChatWindow receives it even if it connects after broadcast
+    if data.get("type") == "user_message":
+        _pending_user_message = data
+    elif data.get("type") == "assistant_done":
+        _pending_user_message = None
     if not _AVAILABLE or not _loop or not connected:
         return
     msg = json.dumps(data)
