@@ -1,11 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * Transcribe an audio blob via the Rust backend (OpenAI Whisper).
- *
- * Converts the blob to base64 in chunks to avoid call-stack overflow,
- * then invokes the Rust `transcribe_audio` command. Handles specific
- * HTTP error codes (401, 429, 500+) with user-friendly messages.
+ * Transcribes recorded audio through Tauri (`transcribe_audio` / Whisper); chunks base64 encoding to avoid stack limits.
+ * @param audio - Audio blob from MediaRecorder
+ * @param apiKey - OpenAI API key (`sk-…`)
+ * @returns Trimmed transcript text
  */
 export async function fetchSTT(audio: Blob, apiKey: string): Promise<string> {
   if (!apiKey || !apiKey.startsWith("sk-")) {
@@ -51,8 +50,8 @@ export async function fetchSTT(audio: Blob, apiKey: string): Promise<string> {
 }
 
 /**
- * Detect the best MediaRecorder mimeType supported by this browser/webview.
- * WKWebView (macOS Tauri) doesn't support audio/webm — it supports audio/mp4.
+ * Picks the first `MediaRecorder`-supported mime type for this environment (e.g. `audio/mp4` on WKWebView).
+ * @returns Supported mime type string, or `""` if none
  */
 export function getSupportedMimeType(): string {
   const candidates = [

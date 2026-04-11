@@ -42,10 +42,10 @@ function getAudioContext(): AudioContext {
 }
 
 /**
- * Speak text aloud via OpenAI TTS.
- *
- * Stops any currently playing audio before starting new speech.
- * The function resolves when playback completes (not when the audio is fetched).
+ * Fetches OpenAI TTS via Rust, decodes with Web Audio, and plays it (stops any prior playback first).
+ * @param text - Words to synthesize
+ * @param apiKey - OpenAI API key
+ * @returns Promise that settles when playback finishes
  */
 export async function speak(text: string, apiKey: string): Promise<void> {
   stop();
@@ -86,7 +86,10 @@ export async function speak(text: string, apiKey: string): Promise<void> {
   currentSource.start();
 }
 
-/** Immediately stop any playing audio. */
+/**
+ * Stops the active `AudioBufferSourceNode` if one is playing.
+ * @returns void
+ */
 export function stop(): void {
   if (currentSource) {
     try {
@@ -99,6 +102,10 @@ export function stop(): void {
   isPlaying = false;
 }
 
+/**
+ * Whether TTS output is currently in progress after `speak`.
+ * @returns True while audio is playing
+ */
 export function getIsSpeaking(): boolean {
   return isPlaying;
 }

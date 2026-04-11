@@ -33,7 +33,11 @@ let sessions: Session[] = [];
 let interactions: Interaction[] = [];
 let currentSessionId: string | null = null;
 
-/** Start a new tutoring session and set it as the current session. */
+/**
+ * Creates a new session, sets it as current, and returns its id.
+ * @param workspaceMode - Captured workspace type for the session
+ * @returns New session id
+ */
 export function startSession(workspaceMode: "paper" | "whiteboard" = "paper"): string {
   const id = generateId("session");
   const session: Session = {
@@ -46,13 +50,18 @@ export function startSession(workspaceMode: "paper" | "whiteboard" = "paper"): s
   return id;
 }
 
+/**
+ * Id of the session currently receiving interactions, if any.
+ * @returns Active session id or null
+ */
 export function getCurrentSessionId(): string | null {
   return currentSessionId;
 }
 
 /**
- * Log a single question/response interaction to the current session.
- * Auto-starts a session if none exists.
+ * Appends one Q/A interaction to the current session (starts a session first if needed).
+ * @param data - Question, spoken/written replies, optional workspace and screenshot snapshots
+ * @returns The stored interaction record
  */
 export function logInteraction(data: {
   userQuestion: string;
@@ -76,18 +85,29 @@ export function logInteraction(data: {
   return interaction;
 }
 
-/** Get all interactions for a specific session (or the current session). */
+/**
+ * Returns interactions for a session in the order they were logged.
+ * @param sessionId - Session to query; omit to use the current session
+ * @returns Matching interactions, or empty if no session id resolves
+ */
 export function getSessionHistory(sessionId?: string): Interaction[] {
   const sid = sessionId || currentSessionId;
   if (!sid) return [];
   return interactions.filter((i) => i.sessionId === sid);
 }
 
+/**
+ * Snapshot of all sessions (copy of in-memory list).
+ * @returns Array of session metadata objects
+ */
 export function getAllSessions(): Session[] {
   return [...sessions];
 }
 
-/** End the current session by recording its end time. */
+/**
+ * Sets `endedAt` on the current session and clears the active session pointer.
+ * @returns void
+ */
 export function endSession(): void {
   if (currentSessionId) {
     const session = sessions.find((s) => s.id === currentSessionId);
@@ -98,7 +118,10 @@ export function endSession(): void {
   currentSessionId = null;
 }
 
-/** Clear all in-memory data (for testing or session reset). */
+/**
+ * Resets sessions, interactions, and current session (tests or full app reset).
+ * @returns void
+ */
 export function clearAll(): void {
   sessions = [];
   interactions = [];

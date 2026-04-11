@@ -1,21 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for all Hey TA windows",
+  "description": "Minimal IPC for Hey TA webviews (overlay, dashboard, capture overlays). core:default enables Tauri invoke to app-defined Rust commands, core:event listen/unlisten (streaming chat events), and the bundled core path/event/window(read)/webview/app defaults—nothing extra for menus/tray/opener. core:window:allow-start-dragging is required so the overlay bar can be repositioned; other window mutations (show/hide/focus/size/close) are performed from Rust, not from the frontend, so those JS permissions are omitted. Opener and global-shortcut are omitted: external links stay in-webview; global shortcuts are registered in Rust at startup, not via the JS plugin API.",
   "windows": ["overlay", "dashboard", "capture-overlay-*"],
-  "permissions": [
-    "core:default",
-    "opener:default",
-    "core:window:allow-start-dragging",
-    "core:window:allow-set-size",
-    "core:window:allow-show",
-    "core:window:allow-hide",
-    "core:window:allow-close",
-    "core:window:allow-set-focus",
-    "core:window:allow-is-visible",
-    "core:window:allow-destroy",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered"
-  ]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }

@@ -1,119 +1,41 @@
-/**
- * Application Constants
- *
- * Centralized configuration for wake phrases, stop phrases, Whisper artifact
- * filtering, the Socratic tutoring system prompt, and model selection.
- */
-
-/**
- * Wake phrase variants that trigger Hey TA.
- *
- * ## Why So Many Variants?
- *
- * Whisper normalizes speech differently depending on pronunciation, accent, and
- * background noise. "Hey TA" can be transcribed as:
- * - "hey ta" (correct)
- * - "hey t.a." (Whisper interprets it as an abbreviation)
- * - "hey tea" (phonetic similarity)
- * - "hey tee ay" (letter-by-letter pronunciation)
- * - "hay ta" (accent variation)
- * - "eight a" / "hate a" (Whisper misheard)
- *
- * We cast a wide net because false positives are low-cost (the student just
- * gets asked a question they didn't intend) while false negatives break the
- * core experience (student says "Hey TA" and nothing happens).
- */
-export const WAKE_PHRASES = [
-  "hey ta",
-  "hey t.a.",
-  "hey t.a",
-  "hey tea",
-  "hey t a",
-  "hey tee a",
-  "hey tee ay",
-  "hey tee ayy",
-  "hey tay",
-  "hay ta",
-  "hey da",
-  "a ta",
-  "eight a",
-  "hate a",
-];
-
-/**
- * Stop phrases that end the multi-utterance capture mode.
- *
- * When the student says "Hey TA" without a trailing question, we enter
- * capture mode and accumulate speech until a stop phrase is detected.
- * These phrases signal the student is done talking.
- */
-export const STOP_PHRASES = ["thank you", "stop", "got it", "thanks", "that's it", "done"];
-
-/**
- * Whisper transcription artifacts to filter out.
- *
- * Whisper sometimes "hallucinates" short phrases from silence or background noise.
- * These are common artifacts that should not trigger wake phrase detection or
- * be accumulated as part of a question.
- */
 export const WHISPER_ARTIFACTS = new Set([
   ".", "..", "...", "you", "bye", "bye bye", "the end",
   "thank you for watching", "thanks for watching",
   "thank you.", "thanks.", "bye.", "you.", "the end.",
+  "so", "um", "uh", "hmm", "hm", "ah", "oh",
 ]);
 
-/**
- * Socratic Tutoring System Prompt
- *
- * ## Design Philosophy
- *
- * This prompt enforces "Socratic, not solutionist" behavior:
- * - The spoken_blurb gives ONE key insight or nudge (not the answer)
- * - The written_explanation guides step-by-step but asks the student
- *   to make the final connection
- * - Both outputs reference the student's actual visible work
- *
- * ## Structured Output
- *
- * We require raw JSON output (no markdown fences) with exactly two fields.
- * This enables the dual-delivery UX: spoken_blurb → TTS immediately,
- * written_explanation → side panel rendering.
- *
- * The parser (parseTutoringResponse) has 5 fallback strategies for when the
- * model deviates from this format, but the explicit instruction keeps
- * adherence above 95% in practice.
- */
-export const TUTORING_POLICY = `You are "TA", a real-time AI teaching assistant. A student is working on problems at a physical desk (paper, whiteboard, or textbook) and you can see their workspace through a camera.
+export const TUTORING_POLICY = `You are "TA", a real-time AI teaching assistant embedded in a student's workspace. You can see their work through a camera and hear them through a microphone. You are always listening.
 
-You MUST respond with ONLY a raw JSON object (no markdown fences, no extra text before or after). The JSON has exactly two string fields:
+The student's speech is continuously transcribed and sent to you. Most of the time they are thinking aloud, reading problems, or talking to themselves — NOT asking you for help. You must decide whether each message warrants a response.
 
+RESPOND with a JSON object when:
+- The student directly asks a question ("how do I solve this?", "what's wrong here?", "can you help?")
+- The student sounds stuck or frustrated ("I don't get this", "this doesn't work", "I'm confused")
+- The student explicitly addresses you ("TA", "hey", "help me")
+
+DO NOT RESPOND (return exactly: {"spoken_blurb":"","written_explanation":""}) when:
+- The student is just reading a problem aloud
+- The student is thinking through steps ("so then x equals... and then I...")
+- The transcription is noise, fragments, or silence artifacts
+- The student just said "thanks" or "ok" acknowledging your previous response
+
+RESPONSE FORMAT — always raw JSON, no markdown fences:
 {"spoken_blurb":"...","written_explanation":"..."}
 
 Rules for "spoken_blurb":
-- 1-3 sentences, conversational and encouraging
+- 1-3 sentences, warm and conversational
 - Give ONE key insight or nudge toward the next step
-- Do NOT mention JSON, formatting, or field names
-- This will be read aloud by text-to-speech, so write naturally as speech
+- This is read aloud by TTS — write as natural speech, no formatting
 
 Rules for "written_explanation":
-- Detailed Markdown explanation with LaTeX math ($...$ inline, $$...$$ display)
-- Reference what you can actually see in the student's work
-- Include: what they did correctly, where they went wrong, the correct approach step by step
-- Socratic: guide toward the answer, don't give it away unless explicitly asked
+- Detailed Markdown with LaTeX ($...$ inline, $$...$$ display)
+- Reference what you see in the student's actual work
+- Socratic: guide, don't give away the answer unless asked
+- If the image is unclear, say so
 
-General rules:
-- Reference the student's actual visible work specifically
-- If the image is unclear, say so and ask them to reposition
-- If a screenshot of a problem is provided, ground your response in that specific problem
-- If you have insufficient context, ask a clarifying question`;
+When spoken_blurb is empty, written_explanation must also be empty.`;
 
-/**
- * Recap Generation System Prompt
- *
- * Used by notes-generator.ts to produce post-session study notes.
- * The output format (Summary, Key Concepts, Mistakes, Recommendations)
- * is designed to be directly useful for exam preparation.
- */
 export const RECAP_PROMPT = `You are generating study recap notes from a math tutoring session. The student worked on problems on paper/whiteboard and asked their AI teaching assistant for help.
 
 Given the session timeline below, produce:

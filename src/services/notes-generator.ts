@@ -25,10 +25,10 @@ import { getSessionHistory } from "./session-logger";
 import { RECAP_PROMPT } from "@/lib/constants";
 
 /**
- * Generate a Markdown study recap from the current session's interactions.
- *
- * Collects all interactions, formats them as a chronological timeline,
- * and sends to GPT-4o with the RECAP_PROMPT system instruction.
+ * Builds a Markdown recap from session history using non-streaming GPT-4o and `RECAP_PROMPT`.
+ * @param apiKey - OpenAI API key
+ * @param sessionId - Optional session id; defaults to current session when omitted
+ * @returns Generated recap markdown, or a short message when history is empty
  */
 export async function generateSessionRecap(
   apiKey: string,

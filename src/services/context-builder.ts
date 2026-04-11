@@ -42,6 +42,35 @@
 import { TUTORING_POLICY, DEFAULT_MODEL } from "@/lib/constants";
 import type { ConversationEntry } from "@/types";
 
+/** Max characters of user-authored text sent in a single prompt turn (after trim). */
+const USER_TEXT_MAX_CHARS = 2000;
+
+/**
+ * Trims, caps length, and strips common prompt-injection phrases from user text
+ * before it is embedded in model messages.
+ */
+export function sanitizeUserTextForPrompt(text: string): string {
+  let s = text.trim();
+  if (s.length > USER_TEXT_MAX_CHARS) {
+    s = s.slice(0, USER_TEXT_MAX_CHARS);
+  }
+  const patterns: RegExp[] = [
+    /\bignore\s+(all\s+)?(previous|prior)\s+(instructions?|prompts?|rules?|context)\b/gi,
+    /\bdisregard\s+(the\s+)?(above|prior|previous)\b/gi,
+    /\bforget\s+(everything|all)\s+(above|before|prior)\b/gi,
+    /\boverride\s+(the\s+)?(system|instructions?|rules?|prompt)\b/gi,
+    /\byou\s+are\s+now\s+(in\s+)?(developer|debug|admin|jailbreak)\s+mode\b/gi,
+    /\bnew\s+instructions?\s*:/gi,
+    /\bprompt\s+injection\b/gi,
+    /\bjailbreak\b/gi,
+    /\bDAN\s+mode\b/gi,
+  ];
+  for (const re of patterns) {
+    s = s.replace(re, " ");
+  }
+  return s.replace(/\s+/g, " ").trim();
+}
+
 export interface TutoringRequest {
   userQuestion: string;
   workspaceImage: string | null;
@@ -52,22 +81,21 @@ export interface TutoringRequest {
 }
 
 /**
- * Build the messages array for a GPT-4o chat completion request.
- *
- * The system prompt enforces Socratic behavior — the model must return JSON
- * with `spoken_blurb` (1-3 sentences, conversational) and `written_explanation`
- * (detailed Markdown+LaTeX). This dual-output format lets us deliver the spoken
- * hint via TTS immediately while the full explanation renders in the panel.
+ * Builds OpenAI-style chat messages: system tutoring policy, recent history, then multimodal user turn (images + text).
+ * @param request - User question, optional frames, ambient transcripts, history, and response mode
+ * @returns Array of role/content objects ready for the chat API
  */
 export function buildMessages(request: TutoringRequest): object[] {
   const messages: object[] = [];
 
   messages.push({ role: "system", content: TUTORING_POLICY });
 
+  const safeQuestion = sanitizeUserTextForPrompt(request.userQuestion);
+
   // Include last 3 exchanges for continuity (follow-up questions need context)
   const recentHistory = request.conversationHistory.slice(-3);
   for (const entry of recentHistory) {
-    messages.push({ role: "user", content: entry.question });
+    messages.push({ role: "user", content: sanitizeUserTextForPrompt(entry.question) });
     const assistantJSON = JSON.stringify({
       spoken_blurb: entry.spokenBlurb,
       written_explanation: entry.writtenExplanation,
@@ -115,7 +143,7 @@ export function buildMessages(request: TutoringRequest): object[] {
 
   userContent.push({
     type: "text",
-    text: `Student's question: ${request.userQuestion}${modeHint}\n\nRemember: respond with ONLY raw JSON, no markdown fences. {"spoken_blurb":"...","written_explanation":"..."}`,
+    text: `Student just said: "${safeQuestion}"${modeHint}\n\nDecide: is this directed at you or just thinking aloud? Respond with raw JSON only. If not a question for you, return {"spoken_blurb":"","written_explanation":""}`,
   });
 
   messages.push({ role: "user", content: userContent });
@@ -123,6 +151,10 @@ export function buildMessages(request: TutoringRequest): object[] {
   return messages;
 }
 
+/**
+ * Returns the app default LLM id from constants (used when no override is passed).
+ * @returns Default model string
+ */
 export function getDefaultModel(): string {
   return DEFAULT_MODEL;
 }

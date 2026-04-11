@@ -48,6 +48,7 @@ interface Frame {
   imageData: string; // base64 JPEG
   timestamp: number;
   stabilityScore: number;
+  qualityOk: boolean;
 }
 
 const FRAME_BUFFER_SIZE = 10;
@@ -56,8 +57,81 @@ const GRID_ROWS = 6;
 
 let frameBuffer: Frame[] = [];
 let previousGrid: number[][] | null = null;
+let lastQualityAssessment: { ok: boolean; reason?: string } | null = null;
 let canvas: HTMLCanvasElement | null = null;
 let ctx: CanvasRenderingContext2D | null = null;
+
+const QUALITY_SAMPLE_STRIDE = 16;
+
+/**
+ * Assess global luminance and contrast from frame pixels to gate unusable captures.
+ *
+ * Samples every 16th pixel in x and y for speed. Uses the same (R+G+B)/3 luminance
+ * convention as the stability grid. Checks run in order: too dark, low contrast, overexposed.
+ */
+export function assessFrameQuality(imageData: ImageData): {
+  ok: boolean;
+  reason?: string;
+  luminanceMean: number;
+  luminanceVariance: number;
+} {
+  const { width, height, data } = imageData;
+  const values: number[] = [];
+
+  for (let y = 0; y < height; y += QUALITY_SAMPLE_STRIDE) {
+    for (let x = 0; x < width; x += QUALITY_SAMPLE_STRIDE) {
+      const idx = (y * width + x) * 4;
+      values.push((data[idx] + data[idx + 1] + data[idx + 2]) / 3);
+    }
+  }
+
+  if (values.length === 0) {
+    return {
+      ok: false,
+      reason: "Low contrast — check camera",
+      luminanceMean: 0,
+      luminanceVariance: 0,
+    };
+  }
+
+  let sum = 0;
+  for (const v of values) sum += v;
+  const luminanceMean = sum / values.length;
+
+  let varSum = 0;
+  for (const v of values) {
+    const d = v - luminanceMean;
+    varSum += d * d;
+  }
+  const luminanceVariance = varSum / values.length;
+
+  if (luminanceMean < 30) {
+    return {
+      ok: false,
+      reason: "Too dark — improve lighting",
+      luminanceMean,
+      luminanceVariance,
+    };
+  }
+  if (luminanceVariance < 10) {
+    return {
+      ok: false,
+      reason: "Low contrast — check camera",
+      luminanceMean,
+      luminanceVariance,
+    };
+  }
+  if (luminanceMean > 240) {
+    return {
+      ok: false,
+      reason: "Overexposed — reduce lighting",
+      luminanceMean,
+      luminanceVariance,
+    };
+  }
+
+  return { ok: true, luminanceMean, luminanceVariance };
+}
 
 /** Lazily create a single offscreen canvas for frame processing. */
 function getCanvas(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
@@ -146,6 +220,9 @@ export function captureFrame(videoElement: HTMLVideoElement): string | null {
   context.drawImage(videoElement, 0, 0, c.width, c.height);
 
   const imageData = context.getImageData(0, 0, c.width, c.height);
+  const quality = assessFrameQuality(imageData);
+  lastQualityAssessment = { ok: quality.ok, reason: quality.reason };
+
   const currentGrid = computeGrid(imageData);
 
   // First frame gets a default score of 0.5 (no previous to compare against)
@@ -161,6 +238,7 @@ export function captureFrame(videoElement: HTMLVideoElement): string | null {
     imageData: base64,
     timestamp: Date.now(),
     stabilityScore,
+    qualityOk: quality.ok,
   });
 
   // Evict oldest frame when buffer exceeds capacity
@@ -171,17 +249,29 @@ export function captureFrame(videoElement: HTMLVideoElement): string | null {
   return base64;
 }
 
-/** Select the highest-stability frame from the buffer. */
+/** Select the best frame from the buffer, preferring passes the luminance/contrast quality gate, then highest stability. */
 export function getBestFrame(): string | null {
   if (frameBuffer.length === 0) return null;
 
   let best = frameBuffer[0];
   for (const frame of frameBuffer) {
-    if (frame.stabilityScore > best.stabilityScore) {
+    const frameBetterQuality = frame.qualityOk && !best.qualityOk;
+    const bestBetterQuality = best.qualityOk && !frame.qualityOk;
+    if (frameBetterQuality) {
+      best = frame;
+    } else if (!bestBetterQuality && frame.stabilityScore > best.stabilityScore) {
       best = frame;
     }
   }
   return best.imageData;
+}
+
+/**
+ * Returns the quality assessment for the most recently captured frame, or null if none yet.
+ * Use this to surface lighting/contrast warnings in the UI without re-reading pixel data.
+ */
+export function getLastQualityAssessment(): { ok: boolean; reason?: string } | null {
+  return lastQualityAssessment;
 }
 
 /** Get the most recent frame (regardless of stability). */
@@ -198,4 +288,5 @@ export function getFrameCount(): number {
 export function clearFrames(): void {
   frameBuffer = [];
   previousGrid = null;
+  lastQualityAssessment = null;
 }

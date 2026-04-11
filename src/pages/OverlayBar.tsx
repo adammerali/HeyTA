@@ -1,42 +1,3 @@
-/**
- * OverlayBar — The Primary UI Surface (Floating Control Bar)
- *
- * ## Architecture
- *
- * This is the most complex component in the app. It manages:
- * - Voice recording loop (persistent MediaStream + chunked MediaRecorder)
- * - Wake phrase detection pipeline (Whisper STT → phrase matching → question extraction)
- * - Multi-utterance capture mode ("Hey TA" → accumulate → "stop" → submit)
- * - Camera toggle integration with the workspace compositor
- * - Screenshot capture via native macOS screencapture
- * - API key entry popover
- * - Status indicator state machine (idle → listening → transcribing → thinking → speaking)
- * - Hover popovers with camera preview, mic visualizer, and screenshot display
- *
- * ## Design Decision: Recording Loop Architecture
- *
- * We use a continuous recording loop rather than VAD-triggered recording:
- * 1. Start MediaRecorder, record for 4 seconds, stop
- * 2. On stop: immediately start next chunk (no gap), transcribe previous in parallel
- * 3. Check transcript for wake phrase or stop phrase
- *
- * This overlapping approach ensures zero gaps in audio capture. The 4-second chunk
- * size balances latency (shorter = faster response) vs. accuracy (Whisper needs
- * enough context to transcribe accurately).
- *
- * ## Design Decision: Persistent MediaStream
- *
- * We acquire the MediaStream once and reuse it across all recording chunks.
- * Creating a new stream per chunk would cause the macOS mic permission prompt
- * to flash repeatedly and adds ~200ms latency per chunk for stream negotiation.
- *
- * ## Status State Machine
- *
- * The display status combines local state with AppContext status:
- * - If AppContext says "thinking" or "speaking", that overrides local status
- * - Otherwise, local status (idle, listening, camera_active, error) is used
- * This ensures the overlay reflects the global tutoring flow state.
- */
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -55,14 +16,14 @@ import {
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { cn, detectWakePhrase, containsStopPhrase } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { AnswerCard } from "@/components/AnswerCard";
 import { AudioVisualizer } from "@/components/AudioVisualizer";
 import { useApp } from "@/contexts/AppContext";
 import { fetchSTT, getSupportedMimeType } from "@/services/stt";
-import { WAKE_PHRASES, STOP_PHRASES, WHISPER_ARTIFACTS } from "@/lib/constants";
+import { WHISPER_ARTIFACTS } from "@/lib/constants";
 
-type BarStatus = "idle" | "camera_active" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
+type BarStatus = "idle" | "camera_active" | "listening" | "thinking" | "speaking" | "error";
 type HoverTarget = null | "camera" | "mic" | "screenshot" | "apikey";
 
 const OverlayBar = () => {
@@ -85,14 +46,13 @@ const OverlayBar = () => {
   const [hoverTarget, setHoverTarget] = useState<HoverTarget>(null);
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
-  const capturingRef = useRef(false);
-  const capturingPartsRef = useRef<string[]>([]);
+  const [lastHeard, setLastHeard] = useState<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const hoverTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const vadEnabledRef = useRef(false);
   const supportedMimeRef = useRef<string>("");
   const persistentStreamRef = useRef<MediaStream | null>(null);
-  const recordingLoopRef = useRef(false);
+  const recentTranscriptsRef = useRef<string[]>([]);
 
   useEffect(() => { vadEnabledRef.current = vadEnabled; }, [vadEnabled]);
 
@@ -115,15 +75,11 @@ const OverlayBar = () => {
     hoverTimeoutRef.current = setTimeout(() => setHoverTarget(null), 300);
   };
 
-  // ---- Voice / STT ----
-
-  const pendingSTTRef = useRef(0);
+  // ---- Continuous voice: every transcript → askQuestion ----
 
   const handleAudioBlob = useCallback(
     async (audioBlob: Blob) => {
       if (!apiKey) return;
-
-      pendingSTTRef.current++;
 
       try {
         const text = await fetchSTT(audioBlob, apiKey);
@@ -131,54 +87,34 @@ const OverlayBar = () => {
           return;
         }
 
-        console.log("[HeyTA] Transcript:", text, "| capturing:", capturingRef.current);
+        console.log("[HeyTA] Heard:", text);
+        setLastHeard(text);
 
-        if (capturingRef.current) {
-          if (containsStopPhrase(text, STOP_PHRASES)) {
-            capturingRef.current = false;
-            const fullQ = capturingPartsRef.current.join(" ").trim();
-            capturingPartsRef.current = [];
-            console.log("[HeyTA] Stop phrase detected, full question:", fullQ);
-            if (fullQ) askQuestion(fullQ);
-          } else {
-            capturingPartsRef.current.push(text);
-          }
-        } else {
-          const { detected, question } = detectWakePhrase(text, WAKE_PHRASES);
-          if (detected) {
-            console.log("[HeyTA] Wake phrase detected, trailing question:", question);
-            if (question) {
-              askQuestion(question);
-            } else {
-              capturingRef.current = true;
-              capturingPartsRef.current = [];
-            }
-          }
+        // Keep a rolling window of recent transcripts for context
+        recentTranscriptsRef.current.push(text);
+        if (recentTranscriptsRef.current.length > 10) {
+          recentTranscriptsRef.current.shift();
         }
+
+        // Send every meaningful transcript to the model — it decides whether to respond
+        askQuestion(text);
       } catch (err) {
         console.error("STT error:", err);
-      } finally {
-        pendingSTTRef.current--;
       }
     },
     [apiKey, askQuestion],
   );
 
-  // Start a single recording chunk on the persistent stream
   const recordChunk = useCallback(() => {
     const stream = persistentStreamRef.current;
     const mime = supportedMimeRef.current;
-    if (!stream || !mime || !vadEnabledRef.current) {
-      recordingLoopRef.current = false;
-      return;
-    }
+    if (!stream || !mime || !vadEnabledRef.current) return;
 
     const chunks: Blob[] = [];
     let recorder: MediaRecorder;
     try {
       recorder = new MediaRecorder(stream, { mimeType: mime });
     } catch {
-      recordingLoopRef.current = false;
       return;
     }
 
@@ -190,14 +126,8 @@ const OverlayBar = () => {
       mediaRecorderRef.current = null;
       const blob = new Blob(chunks, { type: mime });
 
-      // Start next chunk IMMEDIATELY — don't wait for transcription
-      if (vadEnabledRef.current) {
-        recordChunk();
-      } else {
-        recordingLoopRef.current = false;
-      }
+      if (vadEnabledRef.current) recordChunk();
 
-      // Transcribe in parallel (fire-and-forget)
       if (blob.size > 500) {
         handleAudioBlob(blob);
       }
@@ -206,7 +136,6 @@ const OverlayBar = () => {
     recorder.onerror = () => {
       mediaRecorderRef.current = null;
       if (vadEnabledRef.current) setTimeout(recordChunk, 500);
-      else recordingLoopRef.current = false;
     };
 
     mediaRecorderRef.current = recorder;
@@ -217,7 +146,6 @@ const OverlayBar = () => {
     }, 4000);
   }, [handleAudioBlob]);
 
-  // Acquire persistent mic stream and start recording loop
   const startMic = useCallback(async () => {
     const mime = supportedMimeRef.current;
     if (!mime) {
@@ -232,7 +160,6 @@ const OverlayBar = () => {
       persistentStreamRef.current = stream;
       setMicStream(stream);
       setLocalStatus("listening");
-      recordingLoopRef.current = true;
       recordChunk();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Mic access denied";
@@ -243,7 +170,6 @@ const OverlayBar = () => {
   }, [recordChunk]);
 
   const stopMic = useCallback(() => {
-    recordingLoopRef.current = false;
     if (mediaRecorderRef.current?.state === "recording") {
       mediaRecorderRef.current.stop();
     }
@@ -253,8 +179,7 @@ const OverlayBar = () => {
       persistentStreamRef.current = null;
     }
     setMicStream(null);
-    capturingRef.current = false;
-    capturingPartsRef.current = [];
+    setLastHeard(null);
   }, []);
 
   const toggleMic = useCallback(() => {
@@ -302,7 +227,7 @@ const OverlayBar = () => {
       const b64 = await invoke<string>("native_screenshot");
       setProblemScreenshot(b64);
     } catch {
-      // User cancelled
+      // cancelled
     }
     setIsScreenshotting(false);
   }, [setProblemScreenshot]);
@@ -316,14 +241,13 @@ const OverlayBar = () => {
 
   const openPanel = () => invoke("toggle_dashboard");
 
-  // ---- Status display ----
+  // ---- Status ----
 
   const dotColor = (() => {
     switch (displayStatus) {
       case "idle": return "#6b7280";
       case "camera_active": return "#34d399";
       case "listening": return "#60a5fa";
-      case "transcribing": return "#a78bfa";
       case "thinking": return "#fbbf24";
       case "speaking": return "#c084fc";
       case "error": return "#ef4444";
@@ -336,14 +260,12 @@ const OverlayBar = () => {
     switch (displayStatus) {
       case "idle":
         if (!apiKey) return "Click key icon to enter API key";
-        return camera.isActive ? "Ready — camera on" : "Ready";
+        return "Ready";
       case "camera_active":
-        return "Camera on — ready";
+        return "Camera on";
       case "listening":
-        return capturingRef.current
-          ? 'Listening... say "stop" when done'
-          : 'Say "Hey TA" + your question';
-      case "transcribing": return "Processing speech...";
+        if (lastHeard) return `Heard: "${lastHeard.slice(0, 40)}${lastHeard.length > 40 ? "..." : ""}"`;
+        return "Listening...";
       case "thinking": return "Thinking...";
       case "speaking": return "Speaking...";
       case "error": return statusError || "Error";
@@ -351,7 +273,7 @@ const OverlayBar = () => {
     }
   })();
 
-  const isAnimating = !["idle", "camera_active"].includes(displayStatus);
+  const isAnimating = !["idle", "camera_active", "listening"].includes(displayStatus);
 
   // ---- Hover popovers ----
 
@@ -421,7 +343,7 @@ const OverlayBar = () => {
                 <span className="text-[9px] text-white font-medium">LIVE</span>
               </div>
             </div>
-            <p className="text-[10px] text-zinc-500 mt-1.5">Click icon to stop. Best frame sent with each question.</p>
+            <p className="text-[10px] text-zinc-500 mt-1.5">Best frame sent with each question.</p>
           </div>
         );
       }
@@ -447,12 +369,12 @@ const OverlayBar = () => {
       if (vadEnabled) {
         return (
           <div className="w-52">
-            <div className="text-[10px] text-blue-400 mb-1.5 font-medium">MICROPHONE — ACTIVE</div>
+            <div className="text-[10px] text-blue-400 mb-1.5 font-medium">MICROPHONE — LISTENING</div>
             <div className="bg-zinc-800/80 rounded-lg p-2 flex items-center justify-center">
               <AudioVisualizer stream={micStream} isActive={vadEnabled} />
             </div>
             <p className="text-[10px] text-zinc-500 mt-1.5">
-              {capturingRef.current ? 'Capturing... say "stop" when done' : 'Say "Hey TA" then your question'}
+              Just talk naturally. TA will respond when you need help.
             </p>
           </div>
         );
@@ -460,7 +382,7 @@ const OverlayBar = () => {
       return (
         <div className="w-44">
           <div className="text-[10px] text-zinc-400 mb-1 font-medium">MICROPHONE — OFF</div>
-          <p className="text-[10px] text-zinc-500">Click to start listening. Say "Hey TA" + question.</p>
+          <p className="text-[10px] text-zinc-500">Click to start. Just talk — TA will listen and help when needed.</p>
         </div>
       );
     }
@@ -520,7 +442,6 @@ const OverlayBar = () => {
         </Button>
 
         <div className="w-6 h-6 rounded-md flex items-center justify-center text-white font-bold shrink-0 text-[9px] tracking-wide" style={{ background: "#10a37f" }}>TA</div>
-
         <div className="w-px h-4 bg-border shrink-0" />
 
         <div className="flex items-center gap-1.5 min-w-0 flex-1">
@@ -533,7 +454,6 @@ const OverlayBar = () => {
 
         <div className="w-px h-4 bg-border shrink-0" />
 
-        {/* Camera — icon shows CURRENT state */}
         <Button
           ref={cameraRef} variant="ghost" size="icon"
           className={cn("cursor-pointer h-7 w-7 relative", camera.isActive && "bg-emerald-500/20 text-emerald-400")}
@@ -545,7 +465,6 @@ const OverlayBar = () => {
           {camera.isActive && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />}
         </Button>
 
-        {/* Mic — icon shows CURRENT state */}
         <Button
           ref={micRef} variant="ghost" size="icon"
           className={cn(
@@ -557,17 +476,10 @@ const OverlayBar = () => {
           onMouseEnter={() => handleHoverEnter("mic")}
           onMouseLeave={handleHoverLeave}
         >
-          {displayStatus === "transcribing" ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : vadEnabled ? (
-            <Mic className="h-3.5 w-3.5" />
-          ) : (
-            <MicOff className="h-3.5 w-3.5 opacity-50" />
-          )}
+          {vadEnabled ? <Mic className="h-3.5 w-3.5" /> : <MicOff className="h-3.5 w-3.5 opacity-50" />}
           {vadEnabled && <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
         </Button>
 
-        {/* Screenshot */}
         <Button
           ref={screenshotRef} variant="ghost" size="icon"
           className={cn("cursor-pointer h-7 w-7 relative", problemScreenshot && "bg-amber-500/20 text-amber-400")}

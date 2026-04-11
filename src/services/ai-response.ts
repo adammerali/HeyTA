@@ -94,20 +94,12 @@ function createAsyncQueue<T>(): {
 }
 
 /**
- * Stream AI response chunks from GPT-4o via Tauri SSE events.
- *
- * Yields individual content tokens as they arrive from the model.
- * The caller accumulates them into a full response string.
- *
- * @example
- * ```ts
- * let fullText = "";
- * for await (const chunk of streamAIResponse({ apiKey, messages, model })) {
- *   fullText += chunk;
- *   setStreamedResponse(fullText);
- * }
- * const parsed = parseTutoringResponse(fullText);
- * ```
+ * Streams chat completion text via Tauri (`chat_stream_response` + SSE events); yields chunks as they arrive.
+ * @param params.apiKey - OpenAI API key
+ * @param params.messages - Serializable chat messages array
+ * @param params.model - Model identifier
+ * @param params.signal - Optional abort signal (stops iteration and cancels the stream)
+ * @returns Async generator yielding incremental assistant content strings
  */
 export async function* streamAIResponse(params: {
   apiKey: string;
@@ -159,8 +151,11 @@ export async function* streamAIResponse(params: {
 }
 
 /**
- * Non-streaming chat completion — used for recap generation and other
- * background requests where token-by-token streaming isn't needed.
+ * Single non-streaming chat completion via Tauri (`send_message_simple`).
+ * @param params.apiKey - OpenAI API key
+ * @param params.messages - Serializable chat messages array
+ * @param params.model - Model identifier
+ * @returns Full assistant message text
  */
 export async function sendSimpleMessage(params: {
   apiKey: string;

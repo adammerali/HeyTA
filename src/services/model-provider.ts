@@ -99,6 +99,144 @@ export class OpenAIProvider implements ModelProvider {
 }
 
 // --------------------------------------------------------------------------
+// Ollama implementation
+// --------------------------------------------------------------------------
+
+/**
+ * Reference {@link ModelProvider} for local Ollama — shows how to extend the app with another vendor without changing consumers.
+ * Speech is not supported here; use OpenAI (or another provider) for STT/TTS.
+ */
+export class OllamaProvider implements ModelProvider {
+  readonly id = "ollama";
+  readonly displayName = "Ollama (Local)";
+
+  constructor(
+    private readonly baseUrl: string = "http://localhost:11434",
+    private readonly model: string = "llama3",
+  ) {}
+
+  private resolvedModel(model: string): string {
+    return model.trim() ? model : this.model;
+  }
+
+  async *chat(
+    messages: object[],
+    model: string,
+    options?: StreamOptions,
+  ): AsyncGenerator<string> {
+    const url = `${this.baseUrl.replace(/\/$/, "")}/api/chat`;
+    const body: Record<string, unknown> = {
+      model: this.resolvedModel(model),
+      messages,
+      stream: true,
+    };
+    if (options?.maxTokens != null) {
+      body.options = { num_predict: options.maxTokens };
+    }
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: options?.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama chat failed: ${response.status} ${response.statusText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("Ollama chat: empty response body");
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    const abortHandler = () => reader.cancel();
+    options?.signal?.addEventListener("abort", abortHandler);
+
+    try {
+      while (true) {
+        if (options?.signal?.aborted) break;
+
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const json = JSON.parse(trimmed) as {
+              message?: { content?: string };
+              done?: boolean;
+            };
+            const content = json.message?.content;
+            if (typeof content === "string" && content.length > 0) {
+              yield content;
+            }
+            if (json.done) return;
+          } catch {
+            // skip malformed NDJSON lines
+          }
+        }
+      }
+
+      const tail = buffer.trim();
+      if (tail) {
+        try {
+          const json = JSON.parse(tail) as { message?: { content?: string } };
+          const content = json.message?.content;
+          if (typeof content === "string" && content.length > 0) {
+            yield content;
+          }
+        } catch {
+          // ignore trailing parse errors
+        }
+      }
+    } finally {
+      options?.signal?.removeEventListener("abort", abortHandler);
+    }
+  }
+
+  async chatSimple(messages: object[], model: string): Promise<string> {
+    const url = `${this.baseUrl.replace(/\/$/, "")}/api/chat`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: this.resolvedModel(model),
+        messages,
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama chat failed: ${response.status} ${response.statusText}`);
+    }
+
+    const json = (await response.json()) as { message?: { content?: string } };
+    const content = json.message?.content;
+    if (typeof content !== "string") {
+      throw new Error("Ollama chat: missing message content");
+    }
+    return content;
+  }
+
+  async transcribe(_audioBase64: string, _mimeType: string): Promise<string> {
+    throw new Error("Ollama does not support STT - use OpenAI Whisper");
+  }
+
+  async speak(_text: string, _voice?: string): Promise<string> {
+    throw new Error("Ollama does not support TTS - use OpenAI TTS");
+  }
+}
+
+// --------------------------------------------------------------------------
 // Factory
 // --------------------------------------------------------------------------
 
