@@ -12,9 +12,9 @@ const label = getCurrentWindow().label;
 const root = window.document.documentElement;
 root.classList.add("dark");
 
-// Transparency: 10% → opacity 0.9, blur 12px (Pluely defaults)
-root.style.setProperty("--opacity", "0.9");
-root.style.setProperty("--backdrop-blur", "blur(12px)");
+// Overlay: more transparent with stronger blur for frosted-glass look
+root.style.setProperty("--opacity", "0.65");
+root.style.setProperty("--backdrop-blur", "blur(20px)");
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
