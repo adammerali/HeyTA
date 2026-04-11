@@ -17,13 +17,11 @@ root.style.setProperty("--opacity", "0.65");
 root.style.setProperty("--backdrop-blur", "blur(20px)");
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    {label === "overlay" ? (
-      <OverlayBar />
-    ) : (
-      <HashRouter>
-        <App />
-      </HashRouter>
-    )}
-  </React.StrictMode>,
+  label === "overlay" ? (
+    <OverlayBar />
+  ) : (
+    <HashRouter>
+      <App />
+    </HashRouter>
+  )
 );

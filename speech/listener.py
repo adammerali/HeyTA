@@ -41,7 +41,9 @@ def extract_after_wake(text: str) -> str:
     for phrase in WAKE_PHRASES:
         idx = text_lower.find(phrase)
         if idx != -1:
-            return text[idx + len(phrase):].strip()
+            after = text[idx + len(phrase):]
+            # Strip leading punctuation and whitespace (e.g. ", question" → "question")
+            return after.lstrip(" ,.-!?").strip()
     return ""
 
 
@@ -153,7 +155,7 @@ class TAListener:
                     parts.append(text)
                     print(f"  ...{text}")
 
-                full_question = " ".join(p for p in parts if p).strip()
+                full_question = " ".join(p for p in parts if p).strip(" .,!")
                 if full_question:
                     print(f"\nQuestion captured:\n  \"{full_question}\"\n")
                     on_question_callback(full_question, image_b64)

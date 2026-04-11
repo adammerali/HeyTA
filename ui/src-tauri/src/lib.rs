@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::process::{Child, Command};
+use std::sync::Mutex;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// Holds the spawned Python speech process so we can kill it on exit.
+struct SpeechProcess(Mutex<Option<Child>>);
 
 #[cfg(target_os = "macos")]
 #[allow(deprecated)]
@@ -100,7 +105,42 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             init_overlay_panel(app.handle());
+
+            // Spawn the Python speech module — path resolved at compile time
+            let speech_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../speech");
+
+            match Command::new("python3")
+                .arg("main.py")
+                .current_dir(&speech_dir)
+                .spawn()
+            {
+                Ok(child) => {
+                    app.manage(SpeechProcess(Mutex::new(Some(child))));
+                    println!("[TA] Speech module started.");
+                }
+                Err(e) => {
+                    eprintln!("[TA] Failed to start speech module: {e}");
+                    app.manage(SpeechProcess(Mutex::new(None)));
+                }
+            }
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Kill Python when the last window closes
+            if let tauri::WindowEvent::Destroyed = event {
+                let app = window.app_handle();
+                if app.webview_windows().is_empty() {
+                    if let Some(state) = app.try_state::<SpeechProcess>() {
+                        if let Ok(mut guard) = state.0.lock() {
+                            if let Some(mut child) = guard.take() {
+                                let _ = child.kill();
+                            }
+                        }
+                    }
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

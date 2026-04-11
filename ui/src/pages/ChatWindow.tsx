@@ -9,6 +9,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { AppProvider, useApp, Message } from "../context/AppContext";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 const SYSTEM_PROMPT = `You are TA, an intelligent teaching assistant helping students understand course material in real time.
 
@@ -155,6 +156,44 @@ function ChatContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Refs for voice flow — avoid stale closures in WebSocket callback
+  const voiceConvoIdRef = useRef<string | null>(null);
+  const voiceChunkBufferRef = useRef<string>("");
+
+  useWebSocket((msg) => {
+    if (msg.type === "user_message") {
+      const id = createConversation();
+      voiceConvoIdRef.current = id;
+      voiceChunkBufferRef.current = "";
+      addMessage(id, {
+        role: "user",
+        content: msg.content,
+        timestamp: Date.now(),
+        screenshot: msg.image_b64 ? `data:image/jpeg;base64,${msg.image_b64}` : undefined,
+      });
+      setIsLoading(true);
+    }
+
+    if (msg.type === "assistant_chunk") {
+      voiceChunkBufferRef.current += (voiceChunkBufferRef.current ? " " : "") + msg.content;
+    }
+
+    if (msg.type === "assistant_done") {
+      const convoId = voiceConvoIdRef.current;
+      const content = voiceChunkBufferRef.current.trim();
+      if (convoId && content) {
+        addMessage(convoId, {
+          role: "assistant",
+          content,
+          timestamp: Date.now(),
+        });
+      }
+      voiceConvoIdRef.current = null;
+      voiceChunkBufferRef.current = "";
+      setIsLoading(false);
+    }
+  });
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });

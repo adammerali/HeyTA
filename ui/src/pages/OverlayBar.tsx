@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Mic, MicOff, MessageSquareIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 type Status = "ready" | "listening" | "thinking";
 
@@ -30,6 +31,12 @@ export default function OverlayBar() {
       await invoke("open_chat_window");
     } catch {}
   }, []);
+
+  // Drive status and chat window from the Python speech module
+  useWebSocket((msg) => {
+    if (msg.type === "status") setStatus(msg.value);
+    if (msg.type === "open_chat") openChat();
+  });
 
   const dotColor = STATUS_DOT[status];
   const isListening = status === "listening";
