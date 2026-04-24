@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useNavigate } from "react-router-dom";
 import {
   Plus,
   Send,
@@ -7,6 +8,7 @@ import {
   MessageSquare,
   X,
   ChevronRight,
+  ChevronLeft,
 } from "lucide-react";
 import { AppProvider, useApp, Message } from "../context/AppContext";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -79,10 +81,105 @@ function SettingsModal({
         <button
           onClick={() => { onSave(draft); onClose(); }}
           className="w-full py-2 rounded-lg text-sm font-medium text-white transition-opacity hover:opacity-90"
-          style={{ background: "var(--accent)" }}
+          style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.22)", backdropFilter: "blur(10px)" }}
         >
           Save
         </button>
+      </div>
+    </div>
+  );
+}
+
+type VoiceStatus = "idle" | "listening" | "captured";
+type CaptureMode = "voice" | "screenshot" | "camera";
+
+function CameraPreview({
+  status,
+  mode,
+  onCapture,
+}: {
+  status: VoiceStatus;
+  mode: CaptureMode;
+  onCapture: (image_b64: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const active = mode === "camera" && (status === "listening" || status === "captured");
+
+  // Start / stop stream based on active state and mode
+  useEffect(() => {
+    if (!active) {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+      .then((stream) => {
+        streamRef.current = stream;
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      })
+      .catch(() => {/* permission denied or unavailable */});
+
+    return () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    };
+  }, [active, mode]);
+
+  // On "captured": snapshot the live frame, send to Python, release stream
+  useEffect(() => {
+    if (status !== "captured" || mode === "voice") return;
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.drawImage(video, 0, 0);
+      onCapture(canvas.toDataURL("image/jpeg", 0.85).split(",")[1]);
+    }
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, [status, mode]);
+
+  if (!active) return null;
+
+  const isCaptured = status === "captured";
+  const hint =
+    isCaptured
+      ? "Capturing…"
+      : mode === "screenshot"
+      ? "Share your screen, then say \"Thank you\""
+      : "Frame your work, then say \"Thank you\"";
+
+  return (
+    <div
+      className="absolute bottom-24 right-4 z-20 rounded-xl overflow-hidden shadow-2xl"
+      style={{
+        width: 220,
+        border: isCaptured ? "2px solid #a78bfa" : "1px solid rgba(255,255,255,0.12)",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+      }}
+    >
+      <video
+        ref={videoRef}
+        autoPlay
+        muted
+        playsInline
+        className="w-full block bg-black"
+        style={{ aspectRatio: "4/3" }}
+      />
+      <div
+        className="absolute bottom-0 left-0 right-0 px-2 py-1.5 text-[10px] font-medium"
+        style={{
+          background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
+          color: isCaptured ? "#a78bfa" : "rgba(255,255,255,0.75)",
+        }}
+      >
+        {hint}
       </div>
     </div>
   );
@@ -96,7 +193,7 @@ function MessageBubble({ message }: { message: Message }) {
       {!isUser && (
         <div
           className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 mr-3 mt-0.5"
-          style={{ background: "var(--accent)" }}
+          style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.22)", backdropFilter: "blur(10px)" }}
         >
           TA
         </div>
@@ -150,10 +247,26 @@ function ChatContent() {
     addMessage,
   } = useApp();
 
+  const navigate = useNavigate();
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>("idle");
+  const [captureMode, setCaptureMode] = useState<CaptureMode>(
+    () => (localStorage.getItem("captureMode") as CaptureMode) ?? "camera",
+  );
+
+  // Sync capture mode when the user changes it in OverlayBar
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key === "captureMode" && e.newValue)
+        setCaptureMode(e.newValue as CaptureMode);
+    };
+    window.addEventListener("storage", handler);
+    return () => window.removeEventListener("storage", handler);
+  }, []);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -161,11 +274,30 @@ function ChatContent() {
   const voiceConvoIdRef = useRef<string | null>(null);
   const voiceChunkBufferRef = useRef<string>("");
 
-  useWebSocket((msg) => {
+  const { send: sendToBackend } = useWebSocket((msg) => {
+    if (msg.type === "status") {
+      if (msg.value === "listening") setVoiceStatus("listening");
+      else if (msg.value === "captured") setVoiceStatus("captured");
+      else setVoiceStatus("idle");
+    }
+
+    if (msg.type === "request_screenshot") {
+      invoke<string>("take_screenshot")
+        .then((b64) => sendToBackend({ type: "frame_capture", image_b64: b64 }))
+        .catch(() => sendToBackend({ type: "frame_capture", image_b64: null }));
+    }
+
     if (msg.type === "user_message") {
-      const id = createConversation();
-      voiceConvoIdRef.current = id;
+      setVoiceStatus("idle");
       voiceChunkBufferRef.current = "";
+
+      // Follow-up turns append to the ongoing conversation; new questions start fresh
+      let id = msg.is_followup ? voiceConvoIdRef.current : null;
+      if (!id) {
+        id = createConversation();
+        voiceConvoIdRef.current = id;
+      }
+
       addMessage(id, {
         role: "user",
         content: msg.content,
@@ -194,6 +326,11 @@ function ChatContent() {
       setIsLoading(false);
     }
   });
+
+  // Notify Python backend whenever capture mode changes
+  useEffect(() => {
+    sendToBackend({ type: "set_capture_mode", mode: captureMode });
+  }, [captureMode]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -282,7 +419,7 @@ function ChatContent() {
             <div className="flex items-center gap-2">
               <div
                 className="w-6 h-6 rounded-md flex items-center justify-center text-white text-xs font-bold"
-                style={{ background: "var(--accent)" }}
+                style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.22)", backdropFilter: "blur(10px)" }}
               >
                 TA
               </div>
@@ -300,7 +437,10 @@ function ChatContent() {
           {/* New chat */}
           <div className="px-2 py-2">
             <button
-              onClick={createConversation}
+              onClick={() => {
+                createConversation();
+                sendToBackend({ type: "reset_conversation" });
+              }}
               className="flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm transition-colors"
               style={{ color: "var(--text-secondary)" }}
               onMouseEnter={(e) => {
@@ -389,12 +529,20 @@ function ChatContent() {
       )}
 
       {/* Main chat area */}
-      <div className="flex flex-col flex-1 min-w-0 h-full">
+      <div className="relative flex flex-col flex-1 min-w-0 h-full">
         {/* Top bar */}
         <div
           className="flex items-center px-4 py-3 shrink-0"
           style={{ borderBottom: "1px solid var(--border)" }}
         >
+          <button
+            onClick={() => navigate("/")}
+            className="p-1.5 rounded-md mr-2 transition-colors"
+            style={{ color: "var(--text-muted)" }}
+            title="Back to home"
+          >
+            <ChevronLeft size={16} />
+          </button>
           {!sidebarOpen && (
             <button
               onClick={() => setSidebarOpen(true)}
@@ -415,7 +563,7 @@ function ChatContent() {
             <div className="flex flex-col items-center justify-center h-full gap-4 px-6 text-center">
               <div
                 className="w-14 h-14 rounded-2xl flex items-center justify-center text-white text-xl font-bold"
-                style={{ background: "var(--accent)" }}
+                style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.22)", backdropFilter: "blur(10px)" }}
               >
                 TA
               </div>
@@ -431,7 +579,7 @@ function ChatContent() {
                 <button
                   onClick={() => setShowSettings(true)}
                   className="text-sm px-4 py-2 rounded-lg font-medium transition-opacity hover:opacity-90"
-                  style={{ background: "var(--accent)", color: "white" }}
+                  style={{ background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.22)", backdropFilter: "blur(10px)", color: "white" }}
                 >
                   Add API Key to get started
                 </button>
@@ -446,7 +594,7 @@ function ChatContent() {
                 <div className="flex mb-6">
                   <div
                     className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0 mr-3"
-                    style={{ background: "var(--accent)" }}
+                    style={{ background: "#FC6D26" }}
                   >
                     TA
                   </div>
@@ -468,6 +616,14 @@ function ChatContent() {
             </div>
           )}
         </div>
+
+        <CameraPreview
+          status={voiceStatus}
+          mode={captureMode}
+          onCapture={(image_b64) =>
+            sendToBackend({ type: "frame_capture", image_b64 })
+          }
+        />
 
         {/* Input area */}
         <div
@@ -503,7 +659,7 @@ function ChatContent() {
                 className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 transition-all disabled:opacity-30"
                 style={{
                   background: input.trim() && !isLoading
-                    ? "var(--accent)"
+                    ? "rgba(255,255,255,0.15)"
                     : "var(--bg-hover)",
                   color: "white",
                 }}

@@ -35,6 +35,36 @@ struct AnthropicResponse {
 }
 
 #[tauri::command]
+async fn take_screenshot() -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose};
+
+    let tmp_path = std::env::temp_dir().join("heyta_screenshot.jpg");
+    let tmp_str = tmp_path.to_str().ok_or("Invalid temp path")?;
+
+    let status = std::process::Command::new("screencapture")
+        .args(["-x", "-t", "jpg", tmp_str])
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    if !status.success() {
+        return Err("screencapture failed".to_string());
+    }
+
+    let data = std::fs::read(&tmp_path).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&tmp_path);
+
+    Ok(general_purpose::STANDARD.encode(&data))
+}
+
+#[tauri::command]
+async fn minimize_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("chat") {
+        window.minimize().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn open_chat_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("chat") {
         window.show().map_err(|e| e.to_string())?;
@@ -56,7 +86,10 @@ async fn send_message(
     messages: Vec<ChatMessage>,
     system_prompt: String,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
 
     let body = AnthropicRequest {
         model: "claude-sonnet-4-6".to_string(),
@@ -101,10 +134,18 @@ pub fn run() {
 
     builder
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![open_chat_window, send_message])
+        .invoke_handler(tauri::generate_handler![open_chat_window, minimize_window, send_message, take_screenshot])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             init_overlay_panel(app.handle());
+
+            // Open the landing page on startup
+            WebviewWindowBuilder::new(app.handle(), "chat", WebviewUrl::App("/#/".into()))
+                .title("Hey TA")
+                .inner_size(960.0, 680.0)
+                .center()
+                .build()
+                .map_err(|e| e.to_string())?;
 
             // Spawn the Python speech module — path resolved at compile time
             let speech_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
